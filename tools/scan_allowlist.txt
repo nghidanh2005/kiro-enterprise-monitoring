@@ -1,0 +1,4 @@
+# Reviewed false positives for tools/scan_staged.py.
+# Format: <path> <kind> <first 16 hex of sha256(value)>  # reason
+# Copy the path, kind and sha256 from the scanner's hit line. Never write the value.
+vendor/sample-kiro-user-analytics-quicksight-dashboard/tests/test_normalizer.py account-id e760217b6166030d  # YYYYMMDDhhmm export timestamp in an upstream test fixture, not an account
