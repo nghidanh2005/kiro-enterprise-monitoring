@@ -49,6 +49,20 @@ A dashed line means a Lambda in the observability management account reads a cus
 - **No KMS keys.** The CloudTrail, prompt-log and identity-map buckets use SSE-S3 (decision D9). A KMS version needs three keys per customer, and at 200 customers the keys and decrypt requests were about 1,820 of 2,220 USD a month in the estimate. The trade-off: read access depends on S3 and IAM permissions alone, with no second `kms:Decrypt` check.
 - **Only the cost layers have history.** CUR can be backfilled for up to 14 months; the activity report, CloudTrail and prompt logs start on the day they are enabled.
 
+## Cost estimate
+
+[AWS Pricing Calculator: 200 customers, month 13+, no KMS](https://calculator.aws/#/estimate?id=7145854bf2e7032b23d62ac12e4ed543acbfb3cc). Click **Update estimate** after opening it, so the calculator recomputes at current prices.
+
+| Assumption | Value |
+|---|---|
+| Customers | 200, each with 100 Kiro users |
+| Data events | 100 per user per day, 22 working days (not measured yet, OQ-1) |
+| Retention | 13 months (D5), so the figures are for month 13 onward |
+| QuickSight | 2 authors, 10 readers, operator staff only (D1) |
+| Encryption | SSE-S3 everywhere, no KMS keys (D9) |
+
+Computed from the public AWS price list files, not read from the calculator total: about 400 USD a month. 37% of it grows with the number of users (SPICE, CloudTrail data events, Athena scans of the audit logs), so doubling the users per customer raises the total by about 39%. The largest line that does not grow with users is S3 GET requests, because the audit dataset re-reads every kept log file on each daily full refresh. CloudTrail data events are billed to each customer's own account.
+
 ## Open questions
 
 These must be measured before the related layers are built. Each one has a task in [`tasks.md`](.kiro/specs/kiro-customer-monitoring/tasks.md):
