@@ -1,0 +1,23 @@
+{
+  "_help": "Copy this folder to customers/<slug>/ (gitignored) and fill every empty value. Field meanings: docs/customer-config.md",
+  "slug": "",
+  "display_name": "",
+  "accounts": {
+    "payer": "",
+    "kiro": "",
+    "identity_center": ""
+  },
+  "regions": {
+    "kiro_profile": "",
+    "identity_center": ""
+  },
+  "report_bucket": "",
+  "report_prefix": "kiro/",
+  "identity_store_id": "",
+  "external_id": "",
+  "profiles": {
+    "payer": "",
+    "kiro": "",
+    "identity_center": ""
+  }
+}

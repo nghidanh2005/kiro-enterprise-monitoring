@@ -1,0 +1,33 @@
+# Copy to customers/<slug>/customer.tfvars (gitignored) and fill in.
+slug                       = "acme"
+observability_account_id   = "444455556666"
+kiro_account_id            = "111122223333"
+kiro_region                = "us-east-1"
+kiro_profile               = "acme-kiro"
+identity_center_account_id = "222233334444"
+identity_center_region     = "us-east-1"
+identity_center_profile    = "acme-idc"
+
+# Tasks 4.9 and 5.8.
+report_bucket               = "acme-kiro-report"
+report_existing_policy_file = "../../../customers/acme/survey/bucket-policy-report.json"
+report_reader_role_arns     = ["arn:aws:iam::444455556666:role/<CID LambdaRoleArn name>"]
+
+# Tasks 5.6 and 5.8 (D8 = yes).
+enable_idc_read_role  = false
+identity_store_id     = "d-xxxxxxxxxx"
+external_id           = "kiro-mon-acme-<8 random characters>"
+identity_map_role_arn = null # set after task 5.7
+
+# Task 6.3, only after OQ-1.
+enable_trail      = false
+trail_bucket_name = "kiro-mon-trail-acme-444455556666"
+trail_kms_key_arn = "arn:aws:kms:ap-southeast-1:444455556666:key/<id>"
+trail_event_names = []
+
+# Tasks 7.1 and 7.5.
+enable_prompt_logs            = false
+prompt_retention_days         = 90 # chosen by the customer
+prompt_auditor_principal_arns = ["arn:aws:iam::111122223333:role/<customer security role>"]
+enable_prompt_metadata        = false # D4
+promptmeta_destination_bucket = "kiro-mon-promptmeta-acme-444455556666"

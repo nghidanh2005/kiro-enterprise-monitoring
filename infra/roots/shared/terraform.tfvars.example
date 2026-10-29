@@ -1,0 +1,21 @@
+# Copy to customers/_shared/freshness.tfvars (gitignored) and fill in.
+observability_account_id = "444455556666"
+alert_emails             = ["ops@example.com"]
+dry_run                  = false
+
+config = {
+  dc_bucket          = "<CID Data Collection bucket>"
+  collector_function = "CID-DC-kiro-user-activity-Lambda"
+  cur_bucket         = "cid-444455556666-data-exports"
+  customers = [
+    {
+      slug                  = "acme"
+      kiro_account          = "111122223333"
+      report_bucket         = "acme-kiro-report"
+      sample_results_bucket = "kiro-acme-data-athena-results-444455556666-ap-southeast-1"
+      # trail             = { bucket = "kiro-mon-trail-acme-444455556666", region = "us-east-1" }
+      # promptmeta_bucket = "kiro-mon-promptmeta-acme-444455556666"
+      # cur               = { prefix = "cur2/<payer>/cid-cur2/data/", created = "2026-11-01" }
+    },
+  ]
+}

@@ -74,6 +74,38 @@ The full list (OQ-1 to OQ-13) and the decisions still open (D1 to D8) are in [`d
 | `diagrams/build_architecture.py`, `diagrams/drawio_lib.py` | Generator for the detailed diagram, with a geometry check |
 | `diagrams/verify_drawio.py` | Independent diagram check: XML, dangling edges, AWS4 icon names, note fit, page bounds |
 | `LICENSE` | MIT License |
+| `vendor/sample-kiro-user-analytics-quicksight-dashboard/` | The layer 3 sample at upstream commit `1f5f5b8` (MIT-0), plus patches P1-P3 for a report bucket in another account and an ExternalId on the Identity Center role |
+| `vendor/PATCHES.md` | Upstream pin, SHA256 of patched files, every patched line, test results before and after |
+| `tools/survey_customer.py` | Read-only survey of a customer's accounts. Stops before any other call if a profile is not the expected account |
+| `tools/measure_oq.py` | Measures the open questions from temporary buckets. Prints only counts and ID shapes, never content |
+| `tools/scan_staged.py` | Blocks account IDs, Identity Store IDs, `ssoins-` IDs, customer names and em dashes in `*.tf` from commits |
+| `tools/build_audit_views.py` | Renders the audit view. Never selects source IP, request payloads or the full user agent |
+| `tools/reconcile.py` | Checks dashboard numbers against a second source (Cost Explorer, CID vs sample) and writes the customer baseline |
+| `tools/package_sample.py` | Reproducible zip of the patched sample for CloudShell, with a SHA256 file |
+| `infra/customer/` | Customer-side modules: report bucket policy, Identity Center read role, data-event trail, prompt-log bucket, prompt metadata Lambda, Kiro-only CUR export |
+| `infra/observability/` | Observability-side modules: trail bucket, prompt metadata bucket, audit dashboard, freshness check |
+| `infra/roots/` | Roots per account (`customer`, `payer`, `observability-customer`, `shared`), each with `allowed_account_ids` and a `terraform.tfvars.example` |
+| `infra/experiments/oq/` | Temporary resources that measure the open questions |
+| `infra/tests/` | `terraform test` for every module and root, against mocked providers |
+| `docs/RUNBOOK.md`, `docs/TEARDOWN.md` | Operating and removal procedures (Vietnamese) |
+| `infra/observability/freshness/` | Terraform module and Lambda for the daily freshness check and SNS alert |
+| `customers/_template/` | Empty customer config. Every other folder under `customers/` is gitignored |
+| `docs/customer-config.md`, `docs/data-inventory-template.md` | Config field rules, and the data inventory the customer signs per layer |
+
+## Offline checks
+
+None of these need AWS credentials.
+
+```bash
+python -m unittest discover -s tools/tests
+python -m unittest discover -s infra/observability/freshness/tests
+python -m unittest discover -s infra/customer/prompt-metadata/tests
+cd vendor/sample-kiro-user-analytics-quicksight-dashboard && PYTHONPATH=tests python -m unittest discover -s tests && cd -
+cd infra/tests && terraform init -backend=false && terraform test && cd -
+python tools/scan_staged.py   # on what is staged for commit
+```
+
+`terraform test` plans and applies every module against mocked AWS providers, so it creates nothing and needs no credentials. It checks the policies, names and guards; it cannot prove that AWS accepts them. That happens at the first real `terraform plan` of each root.
 
 ## Working with the diagrams
 
