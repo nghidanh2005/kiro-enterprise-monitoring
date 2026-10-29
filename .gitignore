@@ -1,0 +1,33 @@
+# Per-customer data: account IDs, survey output, baselines, tfvars. Never commit.
+customers/
+
+# Local Kiro / Kiro Crew settings of the machine that edits this repo
+.kiro/settings/
+
+# Superseded first draft, kept on the local machine only
+PLAN-kiro-monitoring.md
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+vendor/**/.venv/
+
+# Build and transfer artifacts
+*.zip
+
+# draw.io temporary backups
+.$*.bkp
+*.drawio.bkp
+
+# OS files
+Thumbs.db
+.DS_Store
