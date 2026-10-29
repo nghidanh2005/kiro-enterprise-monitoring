@@ -7,6 +7,8 @@ Cách đọc:
 - **Phụ thuộc**: các task phải xong trước.
 - Mọi file riêng của khách nằm trong `customers/<khách>/` (gitignore).
 
+Trạng thái 2026-10-29: đã xong các task chỉ cần máy (0.x, 2.5, 3.5, 5.1-5.5, 9.1, 9.2), có số đo trong `vendor/PATCHES.md`, các file test và `design.md`. Mọi task còn lại chờ một trong ba thứ: quyết định D1-D8 (1.1), profile còn hạn (2.2-2.4), hoặc xác nhận cho từng lần chạy **[XÁC NHẬN]**.
+
 Sơ đồ phụ thuộc chính:
 ```
 0 -> 1 -> 2 -> 3 (đo OQ) --> 6 (lớp 4) --> 8 (nối + audit)
@@ -19,20 +21,20 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
 
 ---
 
-- [ ] 0. Nền dự án trên máy
-  - [ ] 0.1 Tạo `.gitignore` trước rồi mới `git init`
+- [x] 0. Nền dự án trên máy
+  - [x] 0.1 Tạo `.gitignore` trước rồi mới `git init`
     - Nội dung: `customers/`, `*.tfstate*`, `.terraform/`, `*.tfvars` (trừ `*.tfvars.example`), `vendor/**/.venv/`, `__pycache__/`, `*.zip`.
     - Người làm: Agent
     - Xong khi: `git check-ignore -v customers/x/SURVEY.md` báo đúng rule. Lần `git status` đầu tiên không có file nào trong `customers/`.
     - _Requirements: 14.6, 19.4_
-  - [ ] 0.2 Viết `tools/scan_staged.py` kèm unit test
+  - [x] 0.2 Viết `tools/scan_staged.py` kèm unit test
     - Quét danh sách file đã stage, tìm số 12 chữ số, chuỗi `d-` theo sau là 10 ký tự, chuỗi `ssoins-`, và tên khách có trong `customers/*/config.json`. Có hit thì exit khác 0.
     - Thêm một kiểm riêng cho file `*.tf`: báo lỗi nếu có em dash (U+2014), vì tên và mô tả resource AWS chỉ được dùng dấu gạch ngang thường.
     - Test: mỗi pattern có một mẫu dương và một mẫu âm.
     - Người làm: Agent
     - Xong khi: test pass. Chạy trên một file mồi chứa account ID giả thì exit 1.
     - _Requirements: 14.3, 14.6_
-  - [ ] 0.3 Tạo mẫu cấu hình khách và mẫu danh mục dữ liệu
+  - [x] 0.3 Tạo mẫu cấu hình khách và mẫu danh mục dữ liệu
     - `customers/_template/config.json`: tên khách (slug), account payer, account Kiro, account Identity Center, region Kiro profile, region Identity Center, tên bucket report, ExternalId.
     - `docs/data-inventory-template.md`: bảng theo lớp gồm field, account nguồn, account đích, mục đích, thời gian giữ. Ghi sẵn hai câu bắt buộc: CUR không lọc chứa toàn bộ chi phí AWS; lớp 4 chứa IP nguồn và user agent.
     - Người làm: Agent
@@ -59,6 +61,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
 
 - [ ] 2. Khảo sát chỉ đọc
   - [ ] 2.1 Viết `tools/survey_customer.py`
+    - Trạng thái 2026-10-29: code và 7 test xong (`tools/tests/test_survey_customer.py`). Chạy thật với profile hết hạn thì script dừng ở bước STS và không ghi file. Còn thiếu lần chạy với một profile còn hạn nhưng sai account.
     - Bước đầu tiên: so `sts get-caller-identity` với account mong đợi trong `config.json`. Khác thì dừng trước mọi lời gọi khác, không ghi file.
     - Chỉ gọi API đọc: `codewhisperer`/Kiro profile (chưa rõ API nào trả region và ARN của profile, nếu không có API thì ghi "đọc trên console"), `s3api get-bucket-encryption`, `get-bucket-policy`, `get-bucket-versioning`, `list-objects-v2` (chỉ lấy key sớm nhất và mới nhất dưới `.../KiroLogs/user_report/`), `bcm-data-exports list-exports`/`get-export`, `cur describe-report-definitions`, `organizations describe-organization`, `sso-admin list-instances`, `identitystore list-users` (chỉ đếm), `cloudtrail describe-trails`, `get-event-selectors`.
     - Output chỉ gồm số đếm, ID và cấu hình. Ghi nguyên bucket policy hiện có vào `customers/<khách>/survey/bucket-policy-report.json`, vì task 4.9 phải giữ lại các statement đó.
@@ -83,7 +86,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Người làm: Agent
     - Xong khi: OQ-8 trong `design.md` có số, kèm `usagetype` và ngày đọc.
     - _Requirements: 17.2_
-  - [ ] 2.5 Đọc template Data Exports của CID để trả lời OQ-10
+  - [x] 2.5 Đọc template Data Exports của CID để trả lời OQ-10
     - Tìm cấu hình `INCLUDE_RESOURCES` trong template `CID-DataExports-Source`.
     - Người làm: Agent
     - Xong khi: OQ-10 có câu trả lời kèm tên file và số dòng.
@@ -117,7 +120,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Một user thử gửi 3 câu ở Kiro IDE, 2 câu ở Kiro CLI, và cố tạo 1 request lỗi nếu làm được. Ghi giờ từng câu theo UTC vào `customers/<D7>/oq-chat-times.txt`. Không ghi nội dung câu chat.
     - Người làm: người vận hành
     - Phụ thuộc: 3.3
-  - [ ] 3.5 Viết `tools/measure_oq.py`
+  - [x] 3.5 Viết `tools/measure_oq.py`
     - Đọc object trong hai bucket tạm. Chỉ in:
       - danh sách `eventName` và số event mỗi loại, số event cho mỗi câu chat (đối chiếu theo giờ);
       - tỷ lệ `requestID` của CloudTrail trùng `requestId` của prompt log;
@@ -218,30 +221,30 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - _Requirements: 3.5, 4.2, 16.1, 16.2, 16.6_
 
 - [ ] 5. Lớp 3: sample QuickSight ở account trung tâm
-  - [ ] 5.1 Chép sample nguyên trạng vào `vendor/` và chạy test gốc
+  - [x] 5.1 Chép sample nguyên trạng vào `vendor/` và chạy test gốc
     - Clone ở commit `1f5f5b8d1ffe84776c4d8005eb0cdaf31e3882f5`. Ghi SHA256 của `cfn/01-data-layer.yaml`, `cfn/03-identity-mapping.yaml`, `scripts/deploy.sh`, `scripts/preflight.sh`, `scripts/identity_map_lambda.py` vào `vendor/PATCHES.md`.
     - Chạy `python -m unittest discover -s tests`.
     - Người làm: Agent
     - Xong khi: `vendor/PATCHES.md` có SHA256 và số test pass/fail trước khi vá.
     - _Requirements: 7.4_
-  - [ ] 5.2 Vá P1 (account nguồn cho đường dẫn report) kèm test
+  - [x] 5.2 Vá P1 (account nguồn cho đường dẫn report) kèm test
     - Sửa đúng các dòng nêu ở `design.md` mục 3.3, P1. Thêm test kiểm `RAW_PREFIX` trong hai trường hợp.
     - Người làm: Agent
     - Xong khi: `git diff` chỉ chạm các dòng của P1. Test mới pass.
     - Phụ thuộc: 5.1
     - _Requirements: 7.2, 7.3_
-  - [ ] 5.3 Vá P2 (preflight khi cross-account)
+  - [x] 5.3 Vá P2 (preflight khi cross-account)
     - Người làm: Agent
     - Xong khi: chạy `preflight.sh` với `KIRO_SOURCE_ACCOUNT_ID` khác account đang đăng nhập thì in cảnh báo, không `fail` ở bước kiểm bucket.
     - Phụ thuộc: 5.2
     - _Requirements: 7.2_
-  - [ ] 5.4 Vá P3 (ExternalId cho identity map) kèm test
+  - [x] 5.4 Vá P3 (ExternalId cho identity map) kèm test
     - Test: mock `sts`, kiểm `ExternalId` được truyền khi có biến và không truyền khi biến rỗng.
     - Người làm: Agent
     - Xong khi: test mới pass.
     - Phụ thuộc: 5.1
     - _Requirements: 8.2_
-  - [ ] 5.5 Kiểm toàn bộ bản vá
+  - [x] 5.5 Kiểm toàn bộ bản vá
     - Chạy lại test gốc, `cfn-lint` trên hai template đã sửa, rồi grep toàn repo theo `AccountId`, `ACCOUNT_ID`, `AWSLogs` để chắc không còn chỗ nào ghim account vào đường dẫn report.
     - Người làm: Agent
     - Xong khi: số test pass không giảm so với 5.1. `cfn-lint` không có lỗi mới. `vendor/PATCHES.md` liệt kê từng dòng đã sửa.
@@ -364,12 +367,12 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - _Requirements: 13.3_
 
 - [ ] 9. Giám sát độ tươi
-  - [ ] 9.1 Đọc code collector CID để trả lời OQ-12
+  - [x] 9.1 Đọc code collector CID để trả lời OQ-12
     - Đọc phần Lambda nằm trong template module (khoảng dòng 200-460): lỗi truy cập bucket có được ghi ra log không, ghi theo định dạng nào.
     - Người làm: Agent
     - Xong khi: OQ-12 có câu trả lời kèm số dòng.
     - _Requirements: 15.3_
-  - [ ] 9.2 Viết Lambda `kiro-mon-freshness` kèm test
+  - [x] 9.2 Viết Lambda `kiro-mon-freshness` kèm test
     - Các phép kiểm và ngưỡng theo `design.md` mục 3.7, gồm cả kiểm CUR: báo khi export đã tạo quá 72 giờ mà vẫn chưa có file. Mock S3 và CloudWatch: trễ đúng 2 ngày thì không báo, trễ 3 ngày thì báo. Nội dung cảnh báo chỉ có tên khách, lớp, ngày và số đếm.
     - Người làm: Agent
     - Xong khi: test pass.

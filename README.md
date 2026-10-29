@@ -74,6 +74,25 @@ The full list (OQ-1 to OQ-13) and the decisions still open (D1 to D8) are in [`d
 | `diagrams/build_architecture.py`, `diagrams/drawio_lib.py` | Generator for the detailed diagram, with a geometry check |
 | `diagrams/verify_drawio.py` | Independent diagram check: XML, dangling edges, AWS4 icon names, note fit, page bounds |
 | `LICENSE` | MIT License |
+| `vendor/sample-kiro-user-analytics-quicksight-dashboard/` | The layer 3 sample at upstream commit `1f5f5b8` (MIT-0), plus patches P1-P3 for a report bucket in another account and an ExternalId on the Identity Center role |
+| `vendor/PATCHES.md` | Upstream pin, SHA256 of patched files, every patched line, test results before and after |
+| `tools/survey_customer.py` | Read-only survey of a customer's accounts. Stops before any other call if a profile is not the expected account |
+| `tools/measure_oq.py` | Measures the open questions from temporary buckets. Prints only counts and ID shapes, never content |
+| `tools/scan_staged.py` | Blocks account IDs, Identity Store IDs, `ssoins-` IDs, customer names and em dashes in `*.tf` from commits |
+| `infra/observability/freshness/` | Terraform module and Lambda for the daily freshness check and SNS alert |
+| `customers/_template/` | Empty customer config. Every other folder under `customers/` is gitignored |
+| `docs/customer-config.md`, `docs/data-inventory-template.md` | Config field rules, and the data inventory the customer signs per layer |
+
+## Offline checks
+
+None of these need AWS credentials.
+
+```bash
+python -m unittest discover -s tools/tests
+python -m unittest discover -s infra/observability/freshness/tests
+cd vendor/sample-kiro-user-analytics-quicksight-dashboard && PYTHONPATH=tests python -m unittest discover -s tests
+python tools/scan_staged.py   # on what is staged for commit
+```
 
 ## Working with the diagrams
 

@@ -5,7 +5,7 @@ Tài liệu này trả lời câu hỏi "làm thế nào" cho các requirement t
 - **[ĐÃ ĐO]**: đọc trong source code ở commit đã ghim, có ghi file và số dòng.
 - **[CHƯA XÁC MINH]**: suy luận, hoặc tài liệu không nói. Mỗi chỗ như vậy có một câu hỏi mở OQ-n ở mục 11.
 
-Chưa có lệnh nào chạy trên AWS. Lượt soạn này credential AWS đã hết hạn, nên tôi chưa đọc được Price List API.
+Chưa có lệnh nào thay đổi gì trên AWS. Ngày 2026-10-29 mọi profile CLI trên máy đều hết hạn, nên Price List API (OQ-8) và khảo sát (task 2.2, 2.3) chưa chạy được. OQ-10 và OQ-12 đã trả lời bằng cách đọc source của CID.
 
 ---
 
@@ -89,14 +89,14 @@ sequenceDiagram
 | CUDOS | Bên vận hành | Người vận hành | `cid-cmd deploy` trong CloudShell |
 
 Ràng buộc:
-- Mỗi export ghi vào `<export-name>/<account nguồn>/...` trong bucket của account Data Collection. **[ĐÃ ĐỌC]**
+- Export do stack Source của CID tạo ghi vào prefix `cur2/<account nguồn>` trong bucket `<ResourcePrefix>-<account Data Collection>-data-exports` **[ĐÃ ĐO]** (`data-exports/deploy/data-exports-aggregation.yaml` dòng 691-693, commit `c747c93`). Bản trước của mục này ghi `<export-name>/<account nguồn>/...`, sai so với source. Đường dẫn bên dưới prefix đó (thư mục tên export, `data/`, `BILLING_PERIOD=YYYY-MM/`) là cách Data Exports tự đặt **[CHƯA XÁC MINH]**, kiểm lại bằng `list-objects-v2` sau lần giao đầu.
 - Lần giao đầu mất khoảng 24 giờ, có thể tới 72 giờ. **[ĐÃ ĐỌC]**
 - Backfill tối đa 14 tháng, account payer mở Support case. **[ĐÃ ĐỌC]**
 - Data Exports chỉ có ở `us-east-1`. Khi deploy stack ở region khác, CloudFormation tạo export bằng custom resource. **[ĐÃ ĐỌC]**
 
 **Lọc chỉ Kiro (D2):** query của Data Export hỗ trợ `WHERE` **[ĐÃ ĐỌC]**. Phương án là giữ đủ cột như export của CID, chỉ thêm `WHERE line_item_product_code = 'Kiro'`. Stack Source của CID tạo export với query cố định, nên phải tạo export lọc bằng tay hoặc bằng Terraform. Chưa biết CUDOS và CID có chạy đúng trên CUR đã lọc không (OQ-7).
 
-**Resource ID trong CUR:** CID đếm license theo Identity Center user ID nằm trong `line_item_resource_id` **[ĐÃ ĐỌC]**. Vì vậy export phải bật "Include resource IDs". Chưa đo export của CID mặc định có bật không (OQ-10).
+**Resource ID trong CUR:** CID đếm license theo Identity Center user ID nằm trong `line_item_resource_id` **[ĐÃ ĐỌC]**. Vì vậy export phải bật "Include resource IDs". Export do CID tạo **có bật** **[ĐÃ ĐO]** (OQ-10): `INCLUDE_RESOURCES: "TRUE"` ở cả hai cách tạo export (`data-exports-aggregation.yaml` dòng 684 và 719), và cả 4 query CUR 2.0 của CID đều chọn cột `line_item_resource_id` (dòng 243-252). Nếu khách đã có export tự tạo, `tools/survey_customer.py` đọc hai điều này từ `get-export`.
 
 ### 3.2 Lớp 2: CID Kiro
 
@@ -294,9 +294,10 @@ Lambda `kiro-mon-freshness` ở account trung tâm chạy theo EventBridge Sched
 | Collector CID | Metric `AWS/Lambda Errors` của `CID-DC-kiro-user-activity-Lambda` trong 24 giờ, cộng một truy vấn Logs Insights tìm `AccessDenied` | lớn hơn 0 |
 | CloudTrail | `LastModified` của object mới nhất dưới `AWSLogs/<khách>/CloudTrail/` | quá 24 giờ |
 | Metadata prompt | Partition `dt=` mới nhất | quá 2 ngày, nếu D4 = có |
-| CUR | Object mới nhất dưới `<export-name>/<account payer>/` trong bucket data-exports | chưa có file sau 72 giờ kể từ khi tạo export, hoặc file mới nhất cũ hơn 3 ngày |
+| CUR | Object mới nhất dưới `cur2/<account payer>/<export-name>/data/BILLING_PERIOD=<tháng này hoặc tháng trước>/` trong bucket data-exports (đoạn sau `cur2/<account payer>/` cấu hình được, xem mục 3.1) | chưa có file sau 72 giờ kể từ khi tạo export, hoặc file mới nhất cũ hơn 3 ngày |
 
-- Tên Lambda collector `CID-DC-kiro-user-activity-Lambda` lấy theo tài liệu CID **[ĐÃ ĐỌC]**. Collector có ghi lỗi truy cập ra log không: **[CHƯA XÁC MINH]** (OQ-12).
+- Tên Lambda collector `CID-DC-kiro-user-activity-Lambda` lấy theo tài liệu CID **[ĐÃ ĐỌC]**.
+- **Collector không bao giờ làm metric `Errors` tăng khi lỗi truy cập** **[ĐÃ ĐO]** (OQ-12, `module-kiro-user-activity.yaml` commit `c747c93`). Lỗi của từng file và lỗi khi liệt kê bucket đều bị bắt vào danh sách `errors` (dòng 435-438). Hàm vẫn trả `statusCode: 200` và in một dòng JSON gồm `total_files_copied`, `total_rows_written`, `partitions_registered`, `errors` (tối đa 20 phần tử, dòng 440-447). Vì vậy dòng "Collector CID" ở bảng trên phải đọc dòng JSON đó bằng `logs:FilterLogEvents`, không chỉ dựa vào metric. Mỗi phần tử lỗi bắt đầu bằng `<bucket>/<key>:` hoặc `Error listing <bucket>:`, nên gán được lỗi cho từng khách theo tên bucket. Cảnh báo chỉ ghi số lỗi và số `AccessDenied`, không chép chuỗi lỗi.
 - Cảnh báo gửi tới SNS `kiro-mon-alerts`. Nội dung chỉ có tên khách, lớp, ngày mới nhất và số đếm.
 - Ngưỡng 2 ngày, vì report ngày D có lúc 02:00 UTC ngày D+1 và collector chạy lúc 03:00 UTC.
 - Lớp 3 còn có hai alarm sẵn của sample, xem mục 3.3.
@@ -445,9 +446,9 @@ Lưu ý:
 | OQ-7 | CUDOS và CID có chạy đúng trên CUR chỉ còn dòng Kiro không | D2 | Thử trên account trung tâm: tạo export lọc, deploy CUDOS và CID trên đó, so với export đầy đủ |
 | OQ-8 | Đơn giá CloudTrail data event ở region Kiro profile | Báo giá | Price List API, `ServiceCode=AWSCloudTrail` |
 | OQ-9 | Prompt log có ghi được vào bucket SSE-KMS không, cần key policy gì, độ trễ bao lâu | Lớp 5 | Bucket tạm có KMS, chat thử, đo thời gian |
-| OQ-10 | Export CUR của CID có bật resource ID không | Đếm license của CID | Đọc template `CID-DataExports-Source`, hoặc `bcm-data-exports get-export` sau khi tạo |
+| OQ-10 | Export CUR của CID có bật resource ID không | Đếm license của CID | **Đã đo 2026-10-29: có.** `INCLUDE_RESOURCES: "TRUE"`, `data-exports-aggregation.yaml` dòng 684 và 719 (mục 3.1) |
 | OQ-11 | Trail ở `us-east-1` có ghi vào bucket ở `ap-southeast-1` được không | Region của bucket CloudTrail | Đọc tài liệu CloudTrail, thử bằng trail tạm |
-| OQ-12 | Collector CID có ghi lỗi truy cập ra CloudWatch Logs không | Cảnh báo collector | Đọc code Lambda trong module (dòng 200-460), hoặc gây lỗi trên bucket thử |
+| OQ-12 | Collector CID có ghi lỗi truy cập ra CloudWatch Logs không | Cảnh báo collector | **Đã đo 2026-10-29: có, nhưng chỉ trong dòng JSON kết quả, không làm tăng metric `Errors`.** `module-kiro-user-activity.yaml` dòng 435-447 (mục 3.7) |
 | OQ-13 | Lịch refresh SPICE của dataset CID Kiro | Giờ dữ liệu có trên dashboard | Đọc dataset sau khi `cid-cmd deploy` |
 
 ## 12. Phương án đã cân nhắc và không chọn
@@ -488,3 +489,4 @@ Lưu ý:
 - Source đã đo:
   - `aws-samples/sample-kiro-user-analytics-quicksight-dashboard` @ `1f5f5b8`: `cfn/01-data-layer.yaml`, `cfn/03-identity-mapping.yaml`, `scripts/deploy.sh`, `scripts/preflight.sh`, `scripts/normalize_report_lambda.py`, `scripts/identity_map_lambda.py`, `scripts/build_views.py`, `README.md`.
   - `awslabs/cid-data-collection-framework` @ `main` (2026-10-29, template trỏ `v3.14.10`): `data-collection/deploy/module-kiro-user-activity.yaml`, `data-collection/deploy/deploy-data-collection.yaml`.
+  - `awslabs/cid-data-collection-framework` @ `c747c939d388ab4ab505b4c457159ca9719d3475` (2026-10-29): `data-exports/deploy/data-exports-aggregation.yaml` (OQ-10, prefix CUR), `data-collection/deploy/module-kiro-user-activity.yaml` dòng 312-447 (OQ-12).
