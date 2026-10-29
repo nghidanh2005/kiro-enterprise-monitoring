@@ -6,7 +6,7 @@ Người vận hành chạy các lệnh này. Policy của Kiro Crew chặn agen
 
 1. **Trail (lớp 4) và Lambda metadata (lớp 5b) trước.** Đây là hai thứ đang ghi dữ liệu. Nếu bucket bị xoá trước trail, CloudTrail sẽ thử giao lại log trong 30 ngày và vẫn tính phí cho các event đó (tài liệu CloudTrail, mục "Amazon S3 bucket policy for CloudTrail").
 2. **Dashboard và dataset**, để không còn gì đọc các bucket.
-3. **Bucket và KMS key** ở account trung tâm.
+3. **Bucket** ở account trung tâm. Dự án không tạo KMS key nào (D9), nên không có key phải chờ xoá.
 4. **Bucket policy của khách:** trả về đúng policy lúc khảo sát.
 5. **Role chỉ đọc ở account Identity Center.**
 6. **Stack CID và sample.**
@@ -19,14 +19,13 @@ cd infra/roots/customer   # đặt enable_trail = false trong customer.tfvars
 terraform plan  -var-file=../../../customers/<slug>/customer.tfvars   # chỉ được xoá aws_cloudtrail
 terraform apply -var-file=../../../customers/<slug>/customer.tfvars
 
-# Account trung tâm: bucket, key, bảng
+# Account trung tâm: bucket, bảng
 cd ../observability-customer   # enable_trail_bucket = false
 terraform plan  -var-file=../../../customers/<slug>/observability.tfvars
 terraform apply -var-file=../../../customers/<slug>/observability.tfvars
 ```
 
 - Bucket không có `force_destroy`. Nếu còn object, Terraform dừng ở bước xoá bucket. Muốn xoá dữ liệu thật thì làm rỗng bucket bằng tay trước, sau khi đã kiểm thời gian giữ đã cam kết với khách.
-- KMS key chuyển sang trạng thái chờ xoá 30 ngày. Trong thời gian đó vẫn huỷ được bằng `aws kms cancel-key-deletion`.
 
 ## 2. Lớp 5 và 5b: prompt log và metadata
 
@@ -56,7 +55,7 @@ Agent đo lại bằng `get-bucket-policy`: danh sách `Sid` phải bằng danh 
 
 ## 6. CID và sample (account trung tâm)
 
-- Sample: `scripts/teardown.sh` với cùng `STACK_PREFIX=kiro-<slug>`. **KMS key của identity map vẫn còn sau teardown** (README của sample) và tính 1 USD mỗi tháng cho tới khi xoá riêng.
+- Sample: `scripts/teardown.sh` với cùng `STACK_PREFIX=kiro-<slug>`. Bản sample gốc giữ lại KMS key của identity map sau teardown. Bản trong repo này đã vá P4 nên không tạo key đó.
 - Khách bỏ bucket của mình khỏi `KiroSourceBuckets` của Data Collection Stack, cập nhật stack.
 - CUR: D2 = chỉ Kiro thì `terraform destroy` ở root `infra/roots/payer`. D2 = toàn bộ thì xoá stack `CID-DataExports-Source` ở account payer. Bỏ account payer khỏi `SourceAccountIds` của stack `CID-DataExports-Destination`.
 - Freshness: bỏ khách khỏi `config.customers` của root `infra/roots/shared`, apply. Gỡ hẳn: `terraform destroy` ở root đó.
@@ -73,7 +72,7 @@ cd infra/experiments/oq
 terraform destroy -var account_id=<D7> -var kiro_region=<region>
 ```
 
-Bucket thử có `force_destroy`, nên destroy xoá cả object. Hai KMS key chờ xoá 7 ngày.
+Bucket thử có `force_destroy`, nên destroy xoá cả object. Không có KMS key.
 
 3. Agent đo lại:
 

@@ -170,9 +170,8 @@ def architecture():
            "Đã đọc trong tài liệu và source CID: bucket phải ở account và region của Kiro profile. Prefix kiro/ "
            "là bắt buộc khi deploy qua Data Collection Stack. CID không hỗ trợ SSE-KMS. Bucket policy chỉ cho "
            "GetObject trên kiro/* và ListBucket có điều kiện prefix kiro/*.")
-    d.icon("kmsC", "rK", 290, 760, "key_management_service", "security", ["KMS key của khách", "mã hoá prompt log"])
     d.icon("plog", "rK", 600, 760, "s3", "storage",
-           ["S3 bucket prompt log", "toàn văn, ở lại khách", "SSE-KMS, bên vận hành không đọc"])
+           ["S3 bucket prompt log", "toàn văn, ở lại khách", "SSE-S3, bên vận hành không đọc"])
     d.icon("meta", "rK", 800, 760, "lambda", "compute", ["Lambda metadata", "(tuỳ chọn, D4)"], faded=True)
     d.icon("trail", "rK", 600, 960, "cloudtrail", "mgmt", ["CloudTrail trail", "kiro-mon-audit", "chỉ data event"])
     d.note("n_oq1", "rK", 680, 1000, 210, 110, "red",
@@ -211,11 +210,10 @@ def architecture():
     d.icon("pmb", "rR", 1350, 760, "s3", "storage", ["S3 metadata prompt", "(tuỳ chọn, D4)", "chỉ field cho phép"],
            faded=True)
     d.icon("ctb", "rR", 1350, 960, "s3", "storage",
-           ["S3 CloudTrail khách", "AWSLogs/<id>/CloudTrail/", "SSE-KMS key bên vận hành"])
-    d.icon("kmsR", "rR", 1350, 1110, "key_management_service", "security", ["KMS key bên vận hành", "cho bucket CloudTrail"])
+           ["S3 CloudTrail khách", "AWSLogs/<id>/CloudTrail/", "SSE-S3"])
     d.icon("idm", "rR", 1100, 1300, "lambda", "compute",
            ["Lambda identity map", "03:30 UTC, đã vá P3", "AssumeRole + ExternalId"])
-    d.icon("idb", "rR", 1350, 1300, "s3", "storage", ["S3 identity map", "SSE-KMS (key của sample)", "tên, email user"])
+    d.icon("idb", "rR", 1350, 1300, "s3", "storage", ["S3 identity map", "SSE-S3 (bản vá P4)", "tên, email user"])
     # catalog, query, BI
     d.icon("glue", "rR", 1650, 330, "glue", "analytics",
            ["AWS Glue Data Catalog", "optimization_data, kiro_<khách>"], pos="right")
@@ -232,9 +230,9 @@ def architecture():
     d.icon("cw", "rR", 1650, 1360, "cloudwatch_2", "mgmt", ["CloudWatch alarm", "normalizer-errors,", "normalizer-not-running"])
     # notes
     d.note("n_patch", "rR", 1560, 720, 500, 130, "orange",
-           "Sample đặt ở account trung tâm cần 3 bản vá (D3). P1: thêm SourceAccountId cho RAW_PREFIX, vì template "
+           "Sample đặt ở account trung tâm cần 4 bản vá (D3). P1: thêm SourceAccountId cho RAW_PREFIX, vì template "
            "dòng 313 đang ghim account deploy. P2: preflight chỉ cảnh báo khi bucket ở account khác. P3: identity "
-           "map truyền ExternalId, vì Lambda gốc không truyền. Mỗi khách một bản sample, STACK_PREFIX=kiro-<khách>.")
+           "map truyền ExternalId. P4: bucket identity map dùng SSE-S3, bỏ KMS key riêng. STACK_PREFIX=kiro-<khách>.")
     d.note("n_oq", "rR", 1560, 870, 500, 130, "red",
            "Chưa xác minh. OQ-11: trail có ghi được vào bucket ở ap-southeast-1 không; nếu không, bucket CloudTrail "
            "nằm ở region của trail. OQ-2: requestID của CloudTrail có trùng requestId của prompt log không. OQ-3: "
@@ -315,10 +313,10 @@ def permissions():
          "trên Identity Store của khách."),
         ("ct", 660,
          ("cloudtrail", "mgmt", ["Trail kiro-mon-audit", "cloudtrail.amazonaws.com"]),
-         ("s3", "storage", ["S3 CloudTrail khách", "+ KMS key bên vận hành"]),
+         ("s3", "storage", ["S3 CloudTrail khách", "SSE-S3"]),
          "C2R", "red",
          "Bucket policy phía vận hành: s3:PutObject trên AWSLogs/<account khách>/*, s3:GetBucketAcl, điều kiện "
-         "aws:SourceArn = ARN của trail. Key policy cho cloudtrail.amazonaws.com mã hoá với cùng điều kiện. "
+         "aws:SourceArn = ARN của trail. Không có KMS key, nên không có key policy. "
          "Chưa xác minh: OQ-1 (có data event không) và OQ-11 (bucket khác region được không)."),
         ("cur", 890,
          ("cost_and_usage_report", "mgmt", ["Data Exports ở payer", "bcm-data-exports"]),
@@ -328,11 +326,11 @@ def permissions():
          "Export ghi vào <export-name>/<account payer>/. Phía khách chạy stack CID-DataExports-Source, hoặc "
          "tạo export lọc chỉ Kiro bằng tay nếu chốt D2."),
         ("plog", 1120,
-         ("s3", "storage", ["S3 bucket prompt log", "SSE-KMS key khách"]),
+         ("s3", "storage", ["S3 bucket prompt log", "SSE-S3"]),
          ("lambda", "compute", ["Không có principal", "nào của bên vận hành"]),
          "NONE", "grey",
          "Chỉ q.amazonaws.com được ghi (điều kiện aws:SourceAccount và aws:SourceArn arn:aws:codewhisperer:...). "
-         "Chỉ role kiro-prompt-auditor của khách được đọc và giải mã. Task 7.3 chứng minh bằng head-object từ "
+         "Chỉ role kiro-prompt-auditor của khách được đọc. Task 7.3 chứng minh bằng head-object từ "
          "bên vận hành phải ra 403. Metadata chỉ đi qua Lambda của khách khi chốt D4."),
     ]
     for key, y, (c_res, c_cat, c_lbl), (r_res, r_cat, r_lbl), direction, color, text in rows:

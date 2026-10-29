@@ -100,11 +100,6 @@ variable "trail_bucket_name" {
   default = null
 }
 
-variable "trail_kms_key_arn" {
-  type    = string
-  default = null
-}
-
 variable "trail_event_names" {
   type    = list(string)
   default = []
@@ -181,7 +176,6 @@ module "trail" {
   source                   = "../../customer/trail"
   providers                = { aws = aws.kiro }
   bucket_name              = var.trail_bucket_name
-  kms_key_arn              = var.trail_kms_key_arn
   observability_account_id = var.observability_account_id
   event_names              = var.trail_event_names
   tags                     = { Customer = var.slug }
@@ -203,7 +197,6 @@ module "prompt_metadata" {
   providers                = { aws = aws.kiro }
   slug                     = var.slug
   prompt_bucket_name       = module.prompt_logs[0].bucket_name
-  prompt_kms_key_arn       = module.prompt_logs[0].kms_key_arn
   destination_bucket       = var.promptmeta_destination_bucket
   observability_account_id = var.observability_account_id
 }

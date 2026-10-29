@@ -18,7 +18,7 @@ flowchart LR
     PAY["Account payer<br/>Data Export CUR 2.0"]
     subgraph KA["Account Kiro (region Kiro profile)"]
       RPT["Bucket report<br/>kiro/AWSLogs/...<br/>SSE-S3"]
-      PLG["Bucket prompt log<br/>SSE-KMS key khách"]
+      PLG["Bucket prompt log<br/>SSE-S3"]
       TRL["Trail data event<br/>AWS::CodeWhisperer::Profile"]
       MEX["Lambda metadata<br/>(tuỳ chọn, D4)"]
     end
@@ -30,7 +30,7 @@ flowchart LR
     COL["Lambda collector CID<br/>03:00 UTC"]
     NOR["Lambda normalizer sample<br/>03:15 UTC"]
     IMP["Lambda identity map<br/>03:30 UTC"]
-    CTB["Bucket CloudTrail của khách<br/>SSE-KMS key bên vận hành"]
+    CTB["Bucket CloudTrail của khách<br/>SSE-S3"]
     MDB["Bucket metadata prompt"]
     ATH["Glue + Athena"]
     QS["QuickSight: CUDOS, CID Kiro,<br/>sample, dashboard audit"]
@@ -185,8 +185,7 @@ ExternalId không phải bí mật. Nó chỉ cần duy nhất cho mỗi khách,
 | Thành phần | Account | IaC |
 |---|---|---|
 | Trail `kiro-mon-audit` | Account Kiro của khách, region Kiro profile | `infra/customer/trail` (Terraform) |
-| Bucket `kiro-mon-trail-<khách>-<observability-account-id>` | Bên vận hành, region **[CHƯA XÁC MINH]** (xem dưới) | `infra/observability/trail-bucket` |
-| KMS key `alias/kiro-mon-trail-<khách>` | Bên vận hành | như trên |
+| Bucket `kiro-mon-trail-<khách>-<observability-account-id>` | Bên vận hành, region **[CHƯA XÁC MINH]** (xem dưới), SSE-S3 (D9) | `infra/observability/trail-bucket` |
 | Bảng Athena `kiro_<khách>.cloudtrail_kiro` | Bên vận hành | như trên |
 
 Advanced event selector của trail:
@@ -221,7 +220,7 @@ Statement chính trong bucket policy phía vận hành:
   }
 }
 ```
-Cần thêm statement `s3:GetBucketAcl` cho cùng principal và cùng điều kiện `aws:SourceArn`, theo mẫu trong tài liệu CloudTrail cho nhiều account **[ĐÃ ĐỌC]**. Key policy của KMS cho phép `cloudtrail.amazonaws.com` mã hoá với điều kiện `aws:SourceArn` đó.
+Cần thêm statement `s3:GetBucketAcl` cho cùng principal và cùng điều kiện `aws:SourceArn`, theo mẫu trong tài liệu CloudTrail cho nhiều account **[ĐÃ ĐỌC]**. Trail không đặt KMS key, nên log dùng mã hoá SSE-S3 mặc định của bucket và không có key policy (D9).
 
 **Region của bucket:** trail ở account khách nằm ở `us-east-1` hoặc `eu-central-1`, còn QuickSight của bên vận hành ở `ap-southeast-1`. Có hai lựa chọn:
 - Đặt bucket ở region của trail. Athena ở `ap-southeast-1` sẽ đọc S3 khác region và tốn phí truyền dữ liệu.
@@ -237,15 +236,14 @@ User ID trong CloudTrail: ví dụ event IDE của Amazon Q Developer trên re:P
 
 | Thành phần | Account | IaC |
 |---|---|---|
-| Bucket `<khách>-kiro-prompt-logs` | Account Kiro của khách, region Kiro profile | `infra/customer/prompt-logs` |
-| KMS key của khách | như trên | như trên |
+| Bucket `<khách>-kiro-prompt-logs` | Account Kiro của khách, region Kiro profile, SSE-S3 (D9) | `infra/customer/prompt-logs` |
 | Bảng Athena và role `kiro-prompt-auditor` | như trên | như trên |
 | Lambda metadata (chỉ khi D4 = có) | như trên | `infra/customer/prompt-metadata` |
 | Bucket `kiro-mon-promptmeta-<khách>-<observability-account-id>` | Bên vận hành | `infra/observability/prompt-metadata` |
 
 - Bucket policy cho Kiro ghi theo mẫu tài liệu: principal `q.amazonaws.com`, `s3:PutObject`, điều kiện `aws:SourceAccount` và `aws:SourceArn` dạng `arn:aws:codewhisperer:<region>:<account>:*` **[ĐÃ ĐỌC]**.
-- Prompt log có dùng KMS key được: tài liệu Kiro nhắc tới phí của KMS key tuỳ chọn **[ĐÃ ĐỌC]**. Tài liệu Kiro không nêu key policy. Tài liệu prompt logging của Amazon Q Developer thì có **[ĐÃ ĐỌC]**: cho `q.amazonaws.com` quyền `kms:GenerateDataKey`, điều kiện `aws:SourceAccount` và `aws:SourceArn` dạng `arn:aws:codewhisperer:<region>:<account>:*`. Module `infra/customer/prompt-logs` dùng đúng statement đó. Kiro có dùng chung cơ chế này không vẫn phải đo ở OQ-9.
-- Cũng tài liệu Q Developer đó ghi đường dẫn log là `<prefix>/AWSLogs/<account>/QDeveloperLogs/<log-type>/<region>/<y>/<m>/<d>/<hour>/<file>.gz/<file>.json` **[ĐÃ ĐỌC]**, và ghi rằng prompt logging không hỗ trợ user được subscribe ở member account của Organization. Tài liệu Kiro không nói hai điều này. Nếu Kiro cũng giới hạn như vậy, khách có user ở member account sẽ không có lớp 5. Phải hỏi khách user được subscribe ở account nào (task 2.2), và đo ở OQ-9.
+- Bucket dùng SSE-S3, không có KMS key (D9). Tài liệu Kiro ghi KMS key là tuỳ chọn **[ĐÃ ĐỌC]**, nên bucket không có key là cấu hình Kiro hỗ trợ. Kiro chỉ cần statement `s3:PutObject` ở trên. Việc Kiro thực sự ghi được vào bucket này, và độ trễ, vẫn đo ở OQ-9.
+- Tài liệu prompt logging của Amazon Q Developer ghi đường dẫn log là `<prefix>/AWSLogs/<account>/QDeveloperLogs/<log-type>/<region>/<y>/<m>/<d>/<hour>/<file>.gz/<file>.json` **[ĐÃ ĐỌC]**, và ghi rằng prompt logging không hỗ trợ user được subscribe ở member account của Organization. Tài liệu Kiro không nói hai điều này. Nếu Kiro cũng giới hạn như vậy, khách có user ở member account sẽ không có lớp 5. Phải hỏi khách user được subscribe ở account nào (task 2.2), và đo ở OQ-9.
 - Chưa đo độ trễ từ lúc chat tới lúc file prompt log xuất hiện (OQ-9).
 
 **Metadata prompt: danh sách field được phép.** Đây là danh sách trắng. Field nào không có tên ở đây thì không được ra khỏi account khách.
@@ -350,8 +348,8 @@ Role đọc Identity Center ở account Identity Center của khách:
 |---|---|---|---|
 | CUR | chi phí, usage type, resource ID (gồm Identity Center user ID của người dùng Kiro) | Bên vận hành | QuickSight, role FinOps |
 | Report | user ID, email (thường trống theo README sample), tier, credit, message theo model, client | Khách, kèm bản sao ở bên vận hành | Collector, normalizer, QuickSight |
-| Identity map | username, tên hiển thị, email | Bucket SSE-KMS riêng của sample ở bên vận hành, cộng SPICE | Lambda identity map, QuickSight |
-| CloudTrail | user ID, IP nguồn, user agent, request ID, mã lỗi | Bên vận hành, SSE-KMS | Role audit (bảng gốc), QuickSight (chỉ view đã lược) |
+| Identity map | username, tên hiển thị, email | Bucket SSE-S3 riêng của sample ở bên vận hành (bản vá P4), cộng SPICE | Lambda identity map, QuickSight |
+| CloudTrail | user ID, IP nguồn, user agent, request ID, mã lỗi | Bên vận hành, SSE-S3 | Role audit (bảng gốc), QuickSight (chỉ view đã lược) |
 | Prompt log | toàn văn | Chỉ ở khách | Không ai |
 | Metadata prompt | ID, thời điểm, độ dài | Bên vận hành (khi D4 = có) | Role audit, QuickSight |
 
@@ -371,7 +369,7 @@ kiro-monitoring\
   tools\scan_staged.py                    secret scan trên file đã stage
   infra\observability\                           Terraform: trail-bucket, prompt-metadata, audit-views, audit-dashboard, freshness
   infra\customer\                         Terraform: trail, prompt-logs, prompt-metadata, idc-read-role, report-bucket-policy
-  vendor\sample-kiro-user-analytics-quicksight-dashboard\   bản đã vá P1-P3
+  vendor\sample-kiro-user-analytics-quicksight-dashboard\   bản đã vá P1-P4
 ```
 
 Mỗi khách có một Terraform state riêng cho mỗi account: `customers/<khách>/state-observability` và `customers/<khách>/state-customer`. Với cả hai account, `provider` dùng `allowed_account_ids` để Terraform từ chối chạy nhầm account.
@@ -385,7 +383,7 @@ Mỗi khách có một Terraform state riêng cho mỗi account: `customers/<kh�
 | Khách đổi S3 location của report | Freshness báo trễ, prefix cũ vẫn còn file | Cập nhật SURVEY, xác nhận prefix `kiro/` |
 | Kiro thêm model mới | Có cột `<model>_messages` mới | Không cần làm gì: normalizer đọc theo tên cột **[ĐÃ ĐỌC]** README sample |
 | CUR chưa về sau 72 giờ | Không có file dưới `<export>/<payer>/` | Kiểm export ở account payer, kiểm bucket policy của Data Exports |
-| Trail giao lỗi | `LatestDeliveryError` khác rỗng | Kiểm bucket policy, key policy, điều kiện `aws:SourceArn` |
+| Trail giao lỗi | `LatestDeliveryError` khác rỗng | Kiểm bucket policy và điều kiện `aws:SourceArn` |
 | Record prompt log có cấu trúc lạ | Metric `SkippedRecords` lớn hơn 0 | Không ghi nội dung ra log. Lấy record mẫu từ phía khách, cập nhật schema |
 | Terraform chạy nhầm account | `allowed_account_ids` chặn ở bước plan | Dừng, kiểm profile |
 
@@ -417,17 +415,17 @@ Mỗi khách có một Terraform state riêng cho mỗi account: `customers/<kh�
 | Khoản | Account chịu | Ước lượng | Nguồn |
 |---|---|---|---|
 | Pipeline sample | Bên vận hành | khoảng 0,05 USD/tháng | Số đo 30 ngày trong README sample |
-| KMS key identity map | Bên vận hành | 1 USD/tháng, key vẫn còn sau teardown | README sample |
-| KMS key bucket CloudTrail | Bên vận hành | 1 USD/tháng cho mỗi key, cộng 0,03 USD cho 10.000 request | Price List, `ap-southeast-1-KMS-Keys` và `ap-southeast-1-KMS-Requests`, bản công bố 2026-10-26 (OQ-8) |
 | Lưu CUR | Bên vận hành | dưới 10 USD/tháng với tổ chức cỡ vừa | Tài liệu CID |
 | CloudTrail data event | Khách (người sở hữu trail) | 0,10 USD cho 100.000 event, nhân với số event | Đơn giá đã đo (OQ-8): 0,000001 USD mỗi event ở cả `USE1-DataEventsRecorded`, `EUC1-DataEventsRecorded` và `APS1-DataEventsRecorded`, bản công bố 2026-09-11. Số event mỗi câu chat **[CHƯA XÁC MINH]** (OQ-1) |
-| Prompt log, KMS key của khách | Khách | phí S3 và KMS | Tài liệu Kiro |
+| Prompt log | Khách | phí S3 | Tài liệu Kiro |
 | QuickSight reader | Bên vận hành | khoảng 3 USD/reader/tháng (suy từ README: 1 author + 25 reader = 99 USD) | README sample |
 | Phí 250 USD/tháng của QuickSight | Account trung tâm | chỉ phát sinh khi account có user Pro hoặc đã bật Amazon Q in QuickSight, kiểm ở task 2.3 | README sample |
 
 Lưu ý:
 - Phí CloudTrail tính cho account sở hữu trail, tức account khách. Phải ghi điều này trong báo giá.
 - Khoản dễ đội nhất là số reader QuickSight. Chỉ cấp quyền theo danh sách ở D1.
+- Không có KMS key nào (D9). Phiên bản dùng KMS cần 3 key mỗi khách. Ước lượng với 200 khách, 100 user mỗi khách, từ tháng thứ 13: 2.220 USD/tháng có KMS, 400 USD/tháng không có KMS. KMS chiếm 1.820 USD, gồm phí key có rotation và phí Decrypt khi refresh audit đọc lại file log. Nguồn: file giá công khai `awskms` ap-southeast-1 và us-east-1 (1 USD mỗi key version mỗi tháng, 0,03 USD cho 10.000 request), tính bằng script, chưa đối chiếu với tổng của calculator.
+- Không có KMS thì số user mỗi khách tăng gấp đôi làm tổng tăng khoảng 39%. Phần tăng theo user là SPICE, phí CloudTrail data event và Athena quét log audit. Số event mỗi user là giả định 100 event/ngày cho tới khi có OQ-1.
 
 ## 10. Quyết định cần chốt
 
@@ -441,6 +439,7 @@ Lưu ý:
 | D6 | Account và region nhận | | **`<observability-account-id>`, `ap-southeast-1`**, nơi QuickSight đã chạy | `<observability-account-id>`, `ap-southeast-1`. 2026-10-29, theo đề xuất (người vận hành: "làm tất cả") |
 | D7 | Account dùng để đo OQ-1 đến OQ-4 | (a) Account trung tâm có user Kiro. (b) Account khách | **(a)** nếu khảo sát thấy bên vận hành có user Kiro, để không tạo resource thử trên account khách | (a) nếu task 2.3 thấy account trung tâm có user Kiro, ngược lại (b). 2026-10-29, theo đề xuất (người vận hành: "làm tất cả") |
 | D8 | Bật identity mapping | (a) Có. (b) Không | **(a)**, vì README sample ghi cột email trong report thường trống, nếu tắt thì dashboard chỉ hiện GUID. Cần khách đồng ý cho chuyển tên và email | (a) Có, kèm văn bản đồng ý của khách cho tên và email. 2026-10-29, theo đề xuất (người vận hành: "làm tất cả") |
+| D9 | Mã hoá 3 bucket do dự án tạo (CloudTrail, prompt log, identity map) | (a) SSE-KMS, mỗi khách 3 key. (b) SSE-S3 | Không có đề xuất trước; người vận hành chốt sau khi xem chi phí ở mục 9. Đánh đổi của (b): ai có `s3:GetObject` trên bucket là đọc được, không còn lớp `kms:Decrypt` thứ hai, và không có log CloudTrail của KMS cho mỗi lần đọc. Phần còn lại giữ nguyên: Block Public Access, chặn kết nối không TLS, bucket policy và role tối thiểu | (b) SSE-S3. 2026-10-29, người vận hành: "Bỏ KMS trong code cả 3 bucket". Bucket identity map nằm trong sample, nên cần bản vá P4 |
 
 ## 11. Câu hỏi mở
 
@@ -454,7 +453,7 @@ Lưu ý:
 | OQ-6 | Khách đã có CUR chưa, ở account nào, từ tháng nào, có resource ID không | Lớp 1, 2 | Khảo sát |
 | OQ-7 | CUDOS và CID có chạy đúng trên CUR chỉ còn dòng Kiro không | D2 | Thử trên account trung tâm: tạo export lọc, deploy CUDOS và CID trên đó, so với export đầy đủ |
 | OQ-8 | Đơn giá CloudTrail data event ở region Kiro profile | Báo giá | **Đã đo 2026-10-29:** 0,000001 USD mỗi event (0,10 USD cho 100.000) ở `us-east-1`, `eu-central-1` và `ap-southeast-1`. Nguồn là file giá công khai `offers/v1.0/aws/AWSCloudTrail/current/index.json`, bản công bố 2026-09-11, đọc không cần account |
-| OQ-9 | Prompt log có ghi được vào bucket SSE-KMS không, cần key policy gì, độ trễ bao lâu | Lớp 5 | Bucket tạm có KMS, chat thử, đo thời gian. Key policy dự kiến lấy từ tài liệu Q Developer (mục 3.5); độ trễ và việc Kiro có theo đúng cơ chế đó vẫn chưa đo |
+| OQ-9 | Kiro có ghi được prompt log vào bucket SSE-S3 không, độ trễ bao lâu | Lớp 5 | Bucket tạm SSE-S3, chat thử, đo thời gian. Bucket policy theo tài liệu Kiro (mục 3.5) |
 | OQ-10 | Export CUR của CID có bật resource ID không | Đếm license của CID | **Đã đo 2026-10-29: có.** `INCLUDE_RESOURCES: "TRUE"`, `data-exports-aggregation.yaml` dòng 684 và 719 (mục 3.1) |
 | OQ-11 | Trail ở `us-east-1` có ghi vào bucket ở `ap-southeast-1` được không | Region của bucket CloudTrail | Bằng chứng gián tiếp: trail multi-region giao mọi region vào một bucket (mục 3.4). Đo thẳng bằng `infra/experiments/oq` |
 | OQ-12 | Collector CID có ghi lỗi truy cập ra CloudWatch Logs không | Cảnh báo collector | **Đã đo 2026-10-29: có, nhưng chỉ trong dòng JSON kết quả, không làm tăng metric `Errors`.** `module-kiro-user-activity.yaml` dòng 435-447 (mục 3.7) |
@@ -472,6 +471,7 @@ Lưu ý:
 | Thêm tab vào dashboard CID hoặc sample | Có thể bị ghi đè khi cập nhật (mục 3.6) |
 | Cấp quyền list bucket của khách cho người deploy để preflight chạy được | Mở thêm một principal là người dùng thật. Kết quả gọi normalizer đã là phép kiểm tốt hơn (P2) |
 | Coding metrics collector | Phải cài plugin trên từng máy developer, không quản lý tập trung được |
+| SSE-KMS cho bucket CloudTrail, prompt log và identity map | 3 key mỗi khách. Với 200 khách, KMS chiếm khoảng 1.820 trên 2.220 USD/tháng (mục 9), phần lớn không đổi theo số user. Người vận hành chọn SSE-S3 (D9) và chấp nhận mất lớp `kms:Decrypt` |
 
 ## 13. Nguồn
 
@@ -495,12 +495,10 @@ Lưu ý:
 - [CloudTrail: data event cho CodeWhisperer profile](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-data-events-with-cloudtrail.html#:~:text=Amazon%20CodeWhisperer%20API%20activity%20on%20a%20profile)
 - [CloudTrail: gửi log nhiều account vào một bucket](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-receive-logs-from-multiple-accounts.html#:~:text=deliver%20log%20files%20from%20multiple%20AWS%20accounts%20into%20a%20single%20Amazon%20S3%20bucket)
 - [CloudTrail: bucket policy cho nhiều account](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-set-bucket-policy-for-multiple-accounts.html#:~:text=its%20bucket%20policy%20must%20grant%20CloudTrail%20permission%20to%20write%20log%20files%20from%20all%20the%20accounts)
-- [CloudTrail: KMS key policy cho trail, điều kiện aws:SourceArn](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/create-kms-key-policy-for-cloudtrail.html#:~:text=add%20an%20aws%3ASourceArn%20condition%20key%20to%20the%20KMS%20key%20policy)
 - [CloudTrail: bucket lỗi thì giao lại 30 ngày và vẫn tính phí](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/create-s3-bucket-policy-for-cloudtrail.html#:~:text=CloudTrail%20will%20attempt%20to%20redeliver%20the%20log%20files%20to%20your%20S3%20bucket%20for%2030%20days)
 - [CloudTrail FAQ: trail multi-region giao vào một bucket (OQ-11, gián tiếp)](https://aws.amazon.com/cloudtrail/faqs/#:~:text=deliver%20log%20files%20containing%20account%20activity%20across%20all%20Regions%20to%20a%20single%20S3%20bucket)
 - [Athena: bảng CloudTrail dùng partition projection](https://docs.aws.amazon.com/athena/latest/ug/create-cloudtrail-table-partition-projection.html#:~:text=automatically%20uses%20partition%20projection%20on%20CloudTrail%20logs)
 - [re:Post: event IDE có userIdentity.onBehalfOf và userAgent](https://repost.aws/knowledge-center/log-amazonq-developer-events#:~:text=Events%20that%20your%20IDE%20provides%20include%20details%20about)
-- [Q Developer: key policy KMS cho bucket prompt log](https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/q-admin-prompt-logging.html#:~:text=configuring%20SSE%2DKMS%20on%20the%20bucket%2C%20add%20the%20following%20policy%20on%20the%20KMS)
 - [Q Developer: prompt logging không hỗ trợ user ở member account](https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/q-admin-prompt-logging.html#:~:text=Currently%2C%20Q%20Developer%20does%20not%20support%20logging%20the%20prompts)
 - [CID Data Exports: cấu trúc thư mục của từng export](https://docs.aws.amazon.com/guidance/latest/cloud-intelligence-dashboards/data-exports.html#:~:text=Each%20individual%20Data%20Export%20has%20a%20prefix)
 - [CID Data Exports: mẫu Support case xin backfill](https://docs.aws.amazon.com/guidance/latest/cloud-intelligence-dashboards/data-exports.html#:~:text=Please%20can%20you%20backfill%20the%20data%20in%20DataExport)

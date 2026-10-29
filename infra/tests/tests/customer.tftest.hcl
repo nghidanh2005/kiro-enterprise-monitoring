@@ -11,9 +11,6 @@ mock_provider "aws" {
   mock_data "aws_region" {
     defaults = { region = "us-east-1" }
   }
-  mock_resource "aws_kms_key" {
-    defaults = { arn = "arn:aws:kms:us-east-1:111122223333:key/mock-key-customer" }
-  }
   mock_resource "aws_iam_role" {
     defaults = { arn = "arn:aws:iam::111122223333:role/mock" }
   }
@@ -203,12 +200,15 @@ run "trail_records_kiro_data_events_only" {
   }
   variables {
     bucket_name              = "kiro-mon-trail-acme-444455556666"
-    kms_key_arn              = "arn:aws:kms:ap-southeast-1:444455556666:key/mock-key-trail"
     observability_account_id = "444455556666"
   }
   assert {
     condition     = length(aws_cloudtrail.this.event_selector) == 0
     error_message = "No basic event selector: management events would be recorded."
+  }
+  assert {
+    condition     = aws_cloudtrail.this.kms_key_id == null
+    error_message = "No KMS key: log files use the bucket's SSE-S3 default."
   }
   assert {
     condition     = length(aws_cloudtrail.this.advanced_event_selector) == 1
@@ -233,7 +233,6 @@ run "trail_adds_event_name_filter_when_given" {
   }
   variables {
     bucket_name              = "kiro-mon-trail-acme-444455556666"
-    kms_key_arn              = "arn:aws:kms:ap-southeast-1:444455556666:key/mock-key-trail"
     observability_account_id = "444455556666"
     event_names              = ["GenerateAssistantResponse"]
   }
@@ -243,14 +242,13 @@ run "trail_adds_event_name_filter_when_given" {
   }
 }
 
-run "trail_rejects_key_outside_observability_account" {
+run "trail_rejects_bucket_outside_observability_account" {
   command = plan
   module {
     source = "../customer/trail"
   }
   variables {
-    bucket_name              = "kiro-mon-trail-acme-444455556666"
-    kms_key_arn              = "arn:aws:kms:ap-southeast-1:111122223333:key/mock-key-trail"
+    bucket_name              = "kiro-mon-trail-acme-111122223333"
     observability_account_id = "444455556666"
   }
   expect_failures = [aws_cloudtrail.this]
@@ -289,6 +287,18 @@ run "prompt_logs_never_name_the_observability_account" {
     condition     = aws_s3_bucket_public_access_block.this.block_public_policy && aws_s3_bucket_public_access_block.this.restrict_public_buckets
     error_message = "Block Public Access must be on."
   }
+  assert {
+    condition     = [for r in aws_s3_bucket_server_side_encryption_configuration.this.rule : r.apply_server_side_encryption_by_default[0].sse_algorithm] == ["AES256"]
+    error_message = "Prompt bucket uses SSE-S3, no KMS key."
+  }
+  assert {
+    condition     = aws_athena_workgroup.this[0].configuration[0].result_configuration[0].encryption_configuration[0].encryption_option == "SSE_S3"
+    error_message = "Athena results use SSE-S3."
+  }
+  assert {
+    condition     = !strcontains(output.policies_json, "kms:")
+    error_message = "No policy grants a KMS action."
+  }
 }
 
 run "prompt_logs_guard_fires_when_policy_names_observability_account" {
@@ -301,7 +311,7 @@ run "prompt_logs_guard_fires_when_policy_names_observability_account" {
     observability_account_id = "111122223333"
     retention_days           = 90
   }
-  expect_failures = [aws_kms_key.this]
+  expect_failures = [aws_s3_bucket_policy.this]
 }
 
 run "prompt_logs_no_auditor_by_default" {
@@ -330,13 +340,16 @@ run "promptmeta_lambda_writes_only_its_own_prefix" {
   variables {
     slug                     = "acme"
     prompt_bucket_name       = "acme-kiro-prompt-logs-111122223333"
-    prompt_kms_key_arn       = "arn:aws:kms:us-east-1:111122223333:key/mock-key-customer"
     destination_bucket       = "kiro-mon-promptmeta-acme-444455556666"
     observability_account_id = "444455556666"
   }
   assert {
     condition     = [for s in jsondecode(output.policy_json).Statement : s.Resource if s.Sid == "WriteMetadataOnly"][0] == "arn:aws:s3:::kiro-mon-promptmeta-acme-444455556666/promptmeta/account_id=111122223333/*"
     error_message = "The Lambda may write only under its own account partition."
+  }
+  assert {
+    condition     = !strcontains(output.policy_json, "kms:")
+    error_message = "SSE-S3 prompt bucket: the Lambda needs no KMS action."
   }
   assert {
     condition     = aws_lambda_function.this.environment[0].variables.SOURCE_ACCOUNT_ID == "111122223333"
@@ -352,7 +365,6 @@ run "promptmeta_rejects_destination_outside_observability_account" {
   variables {
     slug                     = "acme"
     prompt_bucket_name       = "acme-kiro-prompt-logs-111122223333"
-    prompt_kms_key_arn       = "arn:aws:kms:us-east-1:111122223333:key/x"
     destination_bucket       = "someone-elses-bucket"
     observability_account_id = "444455556666"
   }

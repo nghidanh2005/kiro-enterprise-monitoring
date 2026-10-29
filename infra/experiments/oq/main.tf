@@ -56,16 +56,15 @@ provider "aws" {
 }
 
 module "trail_bucket" {
-  source                   = "../../observability/trail-bucket"
-  providers                = { aws = aws.bucket }
-  slug                     = "oq"
-  customer_account_id      = var.account_id
-  trail_region             = var.kiro_region
-  trail_name               = "kiro-mon-oq"
-  retention_days           = 3
-  force_destroy            = true
-  glue_database_name       = null
-  kms_deletion_window_days = 7
+  source              = "../../observability/trail-bucket"
+  providers           = { aws = aws.bucket }
+  slug                = "oq"
+  customer_account_id = var.account_id
+  trail_region        = var.kiro_region
+  trail_name          = "kiro-mon-oq"
+  retention_days      = 3
+  force_destroy       = true
+  glue_database_name  = null
 }
 
 module "trail" {
@@ -73,7 +72,6 @@ module "trail" {
   providers                = { aws = aws.kiro }
   trail_name               = "kiro-mon-oq"
   bucket_name              = module.trail_bucket.bucket_name
-  kms_key_arn              = module.trail_bucket.kms_key_arn
   observability_account_id = var.account_id
   tags                     = { Purpose = "oq-experiment" }
 }
@@ -87,7 +85,6 @@ module "prompt_bucket" {
   retention_days           = 3
   create_athena            = false
   force_destroy            = true
-  kms_deletion_window_days = 7
 }
 
 output "trail_bucket" {

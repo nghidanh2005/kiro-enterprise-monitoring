@@ -4,8 +4,8 @@
 #
 # Policies follow the CloudTrail docs (sources in design.md 13):
 #   bucket  AWSCloudTrailAclCheck + AWSCloudTrailWrite with aws:SourceArn
-#   key     GenerateDataKey* with aws:SourceArn and the cloudtrail encryption
-#           context of the customer account, DescribeKey, Decrypt for named readers
+# Encryption is SSE-S3 (decided 2026-10-29): no KMS key, so readers need only
+# s3:GetObject in their own IAM policy, and reads cost no KMS requests.
 
 terraform {
   required_version = ">= 1.6"
@@ -47,12 +47,6 @@ variable "retention_days" {
   default     = 395
 }
 
-variable "reader_role_arns" {
-  description = "Roles in this account that may decrypt the logs: the audit role and the QuickSight service role."
-  type        = list(string)
-  default     = []
-}
-
 variable "glue_database_name" {
   description = "Existing database. The sample creates kiro_<slug> (STACK_PREFIX with - replaced by _). Null skips the table."
   type        = string
@@ -71,11 +65,6 @@ variable "force_destroy" {
   default     = false
 }
 
-variable "kms_deletion_window_days" {
-  type    = number
-  default = 30
-}
-
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
@@ -85,51 +74,8 @@ locals {
   bucket     = "kiro-mon-trail-${var.slug}-${local.account_id}"
   bucket_arn = "arn:${local.p}:s3:::${local.bucket}"
   trail_arn  = "arn:${local.p}:cloudtrail:${var.trail_region}:${var.customer_account_id}:trail/${var.trail_name}"
-  ct_context = "arn:${local.p}:cloudtrail:*:${var.customer_account_id}:trail/*"
   log_root   = "AWSLogs/${var.customer_account_id}/CloudTrail"
   tags       = { Project = "kiro-monitoring", Customer = var.slug }
-
-  key_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = concat([
-      {
-        Sid       = "EnableIAMPolicies"
-        Effect    = "Allow"
-        Principal = { AWS = "arn:${local.p}:iam::${local.account_id}:root" }
-        Action    = "kms:*"
-        Resource  = "*"
-      },
-      {
-        Sid       = "AllowCloudTrailEncryptLogs"
-        Effect    = "Allow"
-        Principal = { Service = "cloudtrail.amazonaws.com" }
-        Action    = "kms:GenerateDataKey*"
-        Resource  = "*"
-        Condition = {
-          StringEquals = { "aws:SourceArn" = local.trail_arn }
-          StringLike   = { "kms:EncryptionContext:aws:cloudtrail:arn" = local.ct_context }
-        }
-      },
-      {
-        Sid       = "AllowCloudTrailDescribeKey"
-        Effect    = "Allow"
-        Principal = { Service = "cloudtrail.amazonaws.com" }
-        Action    = "kms:DescribeKey"
-        Resource  = "*"
-        Condition = { StringEquals = { "aws:SourceArn" = local.trail_arn } }
-      },
-      ], length(var.reader_role_arns) == 0 ? [] : [{
-        Sid       = "AllowNamedReadersToDecrypt"
-        Effect    = "Allow"
-        Principal = { AWS = var.reader_role_arns }
-        Action    = ["kms:Decrypt", "kms:ReEncryptFrom"]
-        Resource  = "*"
-        Condition = {
-          StringEquals = { "kms:CallerAccount" = local.account_id }
-          StringLike   = { "kms:EncryptionContext:aws:cloudtrail:arn" = local.ct_context }
-        }
-    }])
-  })
 
   bucket_policy = jsonencode({
     Version = "2012-10-17"
@@ -201,19 +147,6 @@ locals {
   ]
 }
 
-resource "aws_kms_key" "this" {
-  description             = "Kiro monitoring - CloudTrail logs of customer ${var.slug}"
-  enable_key_rotation     = true
-  deletion_window_in_days = var.kms_deletion_window_days
-  policy                  = local.key_policy
-  tags                    = local.tags
-}
-
-resource "aws_kms_alias" "this" {
-  name          = "alias/kiro-mon-trail-${var.slug}"
-  target_key_id = aws_kms_key.this.key_id
-}
-
 resource "aws_s3_bucket" "this" {
   bucket        = local.bucket
   force_destroy = var.force_destroy
@@ -239,10 +172,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
   bucket = aws_s3_bucket.this.id
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.this.arn
+      sse_algorithm = "AES256"
     }
-    bucket_key_enabled = true
   }
 }
 
@@ -316,18 +247,10 @@ output "bucket_name" {
   value = aws_s3_bucket.this.bucket
 }
 
-output "kms_key_arn" {
-  value = aws_kms_key.this.arn
-}
-
 output "trail_arn_expected" {
   value = local.trail_arn
 }
 
 output "bucket_policy_json" {
   value = local.bucket_policy
-}
-
-output "key_policy_json" {
-  value = local.key_policy
 }

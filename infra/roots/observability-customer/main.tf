@@ -54,12 +54,6 @@ variable "retention_days" {
   default     = 395
 }
 
-variable "reader_role_arns" {
-  description = "Audit role and QuickSight service role that may decrypt CloudTrail logs."
-  type        = list(string)
-  default     = []
-}
-
 variable "glue_database_name" {
   description = "Database of the customer's sample deployment: kiro_<slug> with - replaced by _."
   type        = string
@@ -81,7 +75,6 @@ module "trail_bucket" {
   customer_account_id = var.customer_account_id
   trail_region        = var.kiro_region
   retention_days      = var.retention_days
-  reader_role_arns    = var.reader_role_arns
   glue_database_name  = var.glue_database_name
 }
 
@@ -136,10 +129,6 @@ module "audit" {
 
 output "trail_bucket_name" {
   value = try(module.trail_bucket[0].bucket_name, null)
-}
-
-output "trail_kms_key_arn" {
-  value = try(module.trail_bucket[0].kms_key_arn, null)
 }
 
 output "promptmeta_bucket_name" {

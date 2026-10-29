@@ -6,7 +6,6 @@ kiro_region              = "us-east-1"
 
 # Layer 4: only after OQ-1 shows Kiro emits data events (task 3.6).
 enable_trail_bucket = false
-reader_role_arns    = [] # audit role and QuickSight service role
 glue_database_name  = "kiro_acme"
 
 # D4 and D5.

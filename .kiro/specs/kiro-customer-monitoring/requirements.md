@@ -143,7 +143,7 @@ Requirement này chỉ áp dụng khi câu hỏi mở OQ-1 có câu trả lời 
 1. THE SYSTEM SHALL tạo ở account Kiro của khách một trail chỉ lấy data event loại `AWS::CodeWhisperer::Profile`, đặt ở region của Kiro profile, không lấy management event.
 2. WHERE OQ-1 đã chỉ ra danh sách `eventName` cần thiết THE SYSTEM SHALL lọc trail theo đúng danh sách đó để giảm số event bị tính phí.
 3. THE SYSTEM SHALL gửi log của trail vào một bucket riêng cho khách đó ở account trung tâm, với bucket policy giới hạn bằng `aws:SourceArn` đúng ARN của trail.
-4. THE SYSTEM SHALL mã hoá bucket CloudTrail ở account trung tâm bằng KMS key của bên vận hành. Chỉ role QuickSight, role Athena của dự án và role audit của bên vận hành được giải mã.
+4. THE SYSTEM SHALL mã hoá bucket CloudTrail ở account trung tâm bằng SSE-S3, không dùng KMS key (D9). Quyền đọc log chỉ cấp qua IAM policy cho role QuickSight, role Athena của dự án và role audit của bên vận hành; bucket policy không cấp quyền đọc cho principal nào.
 5. THE SYSTEM SHALL có bảng Athena đọc log CloudTrail của khách, dùng partition projection theo ngày, không cần crawler.
 6. IF `get-trail-status` có `LatestDeliveryError` khác rỗng THEN THE SYSTEM SHALL báo lỗi theo Requirement 15.
 
@@ -152,8 +152,8 @@ Requirement này chỉ áp dụng khi câu hỏi mở OQ-1 có câu trả lời 
 **User story:** Là người phụ trách bảo mật phía khách, tôi muốn toàn văn prompt và câu trả lời nằm lại trong account của mình, để mã nguồn và nội dung trao đổi không ra ngoài.
 
 **Acceptance criteria**
-1. THE SYSTEM SHALL đặt bucket prompt log ở account Kiro của khách, cùng region với Kiro profile, mã hoá SSE-KMS bằng key của khách, chặn public access, chỉ cho phép kết nối TLS.
-2. THE SYSTEM SHALL không cấp cho bất kỳ principal nào của account trung tâm quyền đọc bucket prompt log hoặc quyền giải mã bằng key của nó.
+1. THE SYSTEM SHALL đặt bucket prompt log ở account Kiro của khách, cùng region với Kiro profile, mã hoá SSE-S3 (D9), chặn public access, chỉ cho phép kết nối TLS.
+2. THE SYSTEM SHALL không cấp cho bất kỳ principal nào của account trung tâm quyền đọc bucket prompt log.
 3. THE SYSTEM SHALL có bảng Athena và một role audit thuộc account khách, để người của khách tự tra prompt log theo `requestId`.
 4. THE SYSTEM SHALL áp lifecycle xoá prompt log theo thời gian giữ do khách chọn, ghi trong danh mục dữ liệu.
 

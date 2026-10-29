@@ -11,9 +11,6 @@ mock_provider "aws" {
   mock_data "aws_region" {
     defaults = { region = "ap-southeast-1" }
   }
-  mock_resource "aws_kms_key" {
-    defaults = { arn = "arn:aws:kms:ap-southeast-1:444455556666:key/mock-key-observability" }
-  }
   mock_resource "aws_iam_role" {
     defaults = { arn = "arn:aws:iam::444455556666:role/mock" }
   }
@@ -46,9 +43,6 @@ mock_provider "aws" {
   mock_data "aws_region" {
     defaults = { region = "us-east-1" }
   }
-  mock_resource "aws_kms_key" {
-    defaults = { arn = "arn:aws:kms:us-east-1:444455556666:key/mock-key-kiro-alias" }
-  }
   mock_resource "aws_iam_role" {
     defaults = { arn = "arn:aws:iam::444455556666:role/mock" }
   }
@@ -72,9 +66,6 @@ mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
   }
-  mock_resource "aws_kms_key" {
-    defaults = { arn = "arn:aws:kms:ap-southeast-1:444455556666:key/mock-key-bucket-alias" }
-  }
 }
 
 run "trail_bucket_policies_follow_cloudtrail_docs" {
@@ -86,7 +77,6 @@ run "trail_bucket_policies_follow_cloudtrail_docs" {
     slug                = "acme"
     customer_account_id = "111122223333"
     trail_region        = "us-east-1"
-    reader_role_arns    = ["arn:aws:iam::444455556666:role/kiro-mon-audit"]
     glue_database_name  = "kiro_acme"
   }
   assert {
@@ -106,8 +96,12 @@ run "trail_bucket_policies_follow_cloudtrail_docs" {
     error_message = "Every CloudTrail statement must pin aws:SourceArn to the customer trail."
   }
   assert {
-    condition     = [for s in jsondecode(output.key_policy_json).Statement : s.Condition.StringLike["kms:EncryptionContext:aws:cloudtrail:arn"] if s.Sid == "AllowCloudTrailEncryptLogs"][0] == "arn:aws:cloudtrail:*:111122223333:trail/*"
-    error_message = "Encrypt permission must be bound to the customer's CloudTrail encryption context."
+    condition     = [for r in aws_s3_bucket_server_side_encryption_configuration.this.rule : r.apply_server_side_encryption_by_default[0].sse_algorithm] == ["AES256"]
+    error_message = "Trail bucket uses SSE-S3, no KMS key."
+  }
+  assert {
+    condition     = !strcontains(output.bucket_policy_json, "kms:")
+    error_message = "Bucket policy grants no KMS action."
   }
   assert {
     condition     = length(aws_glue_catalog_table.cloudtrail[0].storage_descriptor[0].columns) == 29 && length(aws_glue_catalog_table.cloudtrail[0].partition_keys) == 2
@@ -123,7 +117,7 @@ run "trail_bucket_policies_follow_cloudtrail_docs" {
   }
 }
 
-run "trail_bucket_without_readers_has_no_decrypt_statement" {
+run "trail_bucket_without_database_has_no_table" {
   command = apply
   module {
     source = "../observability/trail-bucket"
@@ -132,10 +126,6 @@ run "trail_bucket_without_readers_has_no_decrypt_statement" {
     slug                = "acme"
     customer_account_id = "111122223333"
     trail_region        = "us-east-1"
-  }
-  assert {
-    condition     = length([for s in jsondecode(output.key_policy_json).Statement : s if s.Sid == "AllowNamedReadersToDecrypt"]) == 0
-    error_message = "No decrypt grant without named readers."
   }
   assert {
     condition     = length(aws_glue_catalog_table.cloudtrail) == 0

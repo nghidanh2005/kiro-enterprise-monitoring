@@ -41,10 +41,12 @@ A dashed line means a Lambda in the observability management account reads a cus
 - **Pull, not push.** Kiro writes the activity report and the prompt log only to a bucket in the account where users are subscribed; Kiro does not support a bucket in another account. Lambdas in the observability management account read the customer's report bucket, and the customer only adds a bucket policy.
 - **The report bucket must use SSE-S3 under the `kiro/` prefix.** The CID collector does not support SSE-KMS source buckets, and the Data Collection Stack does not pass a prefix to the Kiro module, so the module default `kiro/` always applies.
 - **Prompt text never leaves the customer account.** An optional Lambda in the customer account can forward an allow-listed set of metadata fields (IDs, timestamps, lengths), never the prompt or response text.
-- **One Kiro Usage Analytics deployment per customer.** The sample has no account column, so customers would mix in one deployment. Running it in the observability management account needs three small patches:
+- **One Kiro Usage Analytics deployment per customer.** The sample has no account column, so customers would mix in one deployment. Running it in the observability management account needs four small patches:
   - P1: make the report path take a source account instead of the deploying account.
   - P2: turn the preflight bucket check into a warning when the bucket belongs to another account.
   - P3: pass an ExternalId when the identity-map Lambda assumes the customer's role.
+  - P4: encrypt the identity-map bucket with SSE-S3 instead of a dedicated KMS key.
+- **No KMS keys.** The CloudTrail, prompt-log and identity-map buckets use SSE-S3 (decision D9). A KMS version needs three keys per customer, and at 200 customers the keys and decrypt requests were about 1,820 of 2,220 USD a month in the estimate. The trade-off: read access depends on S3 and IAM permissions alone, with no second `kms:Decrypt` check.
 - **Only the cost layers have history.** CUR can be backfilled for up to 14 months; the activity report, CloudTrail and prompt logs start on the day they are enabled.
 
 ## Open questions
