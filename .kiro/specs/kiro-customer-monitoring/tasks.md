@@ -7,7 +7,7 @@ Cách đọc:
 - **Phụ thuộc**: các task phải xong trước.
 - Mọi file riêng của khách nằm trong `customers/<khách>/` (gitignore).
 
-Trạng thái 2026-10-29: đã xong các task chỉ cần máy (0.x, 2.5, 3.5, 5.1-5.5, 9.1, 9.2), có số đo trong `vendor/PATCHES.md`, các file test và `design.md`. Mọi task còn lại chờ một trong ba thứ: quyết định D1-D8 (1.1), profile còn hạn (2.2-2.4), hoặc xác nhận cho từng lần chạy **[XÁC NHẬN]**.
+Trạng thái 2026-10-29: đã xong mọi phần làm được trên máy. Task đánh dấu [x] có số đo; các task còn lại có dòng 'Trạng thái' ghi phần đã xong và phần chờ. Mọi task còn lại chờ một trong ba thứ: quyết định D1-D8 (1.1), profile còn hạn (2.2, 2.3), hoặc xác nhận cho từng lần chạy **[XÁC NHẬN]**.
 
 Sơ đồ phụ thuộc chính:
 ```
@@ -81,7 +81,8 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Xong khi: `customers/_observability/SURVEY.md` có đủ các mục trên.
     - Phụ thuộc: 0.1
     - _Requirements: 4.3, 17.3_
-  - [ ] 2.4 Đo đơn giá bằng Price List API
+  - [x] 2.4 Đo đơn giá bằng Price List API
+    - Trạng thái 2026-10-29: đã đo từ file giá công khai (không cần account). Số và `usagetype` ở `design.md` OQ-8.
     - CloudTrail data event và KMS key ở region Kiro profile và ở `ap-southeast-1`.
     - Người làm: Agent
     - Xong khi: OQ-8 trong `design.md` có số, kèm `usagetype` và ngày đọc.
@@ -99,6 +100,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
 
 - [ ] 3. Đo OQ-1, OQ-2, OQ-3, OQ-4, OQ-9, OQ-11 bằng resource tạm
   - [ ] 3.1 Viết Terraform `infra/experiments/oq/`
+    - Trạng thái 2026-10-29: `infra/experiments/oq/` xong, test với provider giả lập pass. Chờ D7 và một lần `terraform plan` thật.
     - Bucket tạm cho CloudTrail, lifecycle xoá sau 3 ngày. Bucket tạm cho prompt log, SSE-KMS, key policy thử cho `q.amazonaws.com`. Trail chỉ lấy data event `AWS::CodeWhisperer::Profile`.
     - Đặt bucket CloudTrail ở `ap-southeast-1` để trả lời OQ-11. Nếu API từ chối thì ghi lại lỗi rồi chuyển bucket về region của trail.
     - Provider dùng `allowed_account_ids` bằng account đã chốt ở D7.
@@ -139,6 +141,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Phụ thuộc: 3.4, 3.5
     - _Requirements: 2.5, 2.7_
   - [ ] 3.7 Gỡ resource tạm
+    - Trạng thái 2026-10-29: lệnh gỡ và lệnh đo lại đã viết ở `docs/TEARDOWN.md` mục 7.
     - Người vận hành tắt prompt logging trên Kiro console, hoặc trả về bucket cũ nếu khách đã có. Agent ghi lệnh `terraform destroy` vào `customers/<D7>/teardown-oq.md`, người vận hành chạy. Agent đo lại: trail không còn, hai bucket không còn.
     - Người làm: người vận hành (chạy), Agent (ghi lệnh và đo lại)
     - Xong khi: `describe-trails` không còn `kiro-mon-oq`, `head-bucket` trả 404 cho cả hai bucket.
@@ -166,6 +169,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Phụ thuộc: 4.2, 4.1 (nếu D2 = chỉ Kiro)
     - _Requirements: 3.1, 3.2_
   - [ ] 4.4 Xin backfill CUR
+    - Trạng thái 2026-10-29: nội dung case và lệnh CLI đã soạn ở `docs/RUNBOOK.md` mục 6. Chờ khách gửi.
     - Agent soạn nội dung Support case theo mẫu trong tài liệu CID, ghi vào `docs/RUNBOOK.md`. Account payer của khách tự gửi.
     - Người làm: Agent (soạn), Khách (gửi)
     - Xong khi: khách gửi lại số case.
@@ -190,6 +194,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Phụ thuộc: 4.5
     - _Requirements: 6.1, 19.1_
   - [ ] 4.8 Viết module Terraform `infra/customer/report-bucket-policy`
+    - Trạng thái 2026-10-29: module xong, 4 test pass (giữ Sid cũ, nhận policy một statement, chặn policy làm mất quyền ghi của Kiro, chặn principal không phải role). Chờ plan trên bucket thật.
     - Module dựng **toàn bộ** bucket policy, gồm: các statement đang có (đọc từ file khảo sát ở 2.1, gồm statement cho `q.amazonaws.com` ghi), cộng hai statement đọc cho các role của bên vận hành (design.md mục 4). Danh sách role nhận từ biến, để thêm role normalizer ở task 5.8.
     - `aws_s3_bucket_policy` thay cả policy, nên mọi statement cũ phải nằm trong module.
     - Test: `terraform plan` trên một bucket thử cho thấy policy mới chứa đủ các `Sid` cũ.
@@ -251,6 +256,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Phụ thuộc: 5.2, 5.3, 5.4
     - _Requirements: 7.4_
   - [ ] 5.6 Tạo role đọc Identity Center ở account khách (khi D8 = có) **[XÁC NHẬN]**
+    - Trạng thái 2026-10-29: module xong, 4 test pass (trust trước và sau khi thu hẹp, chặn ID instance, chặn role ở account khác). Chờ xác nhận để apply.
     - Module `infra/customer/idc-read-role`. Ở bước này chưa biết ARN của role Lambda identity map, nên trust policy tạm dùng principal là account trung tâm kèm hai điều kiện: `aws:PrincipalArn` khớp `arn:aws:iam::<observability-account-id>:role/kiro-<khách>-identity-map*`, và `sts:ExternalId`. Sau task 5.7 thì thu hẹp về đúng ARN của role.
     - Quyền: `identitystore:ListUsers` trên Identity Store của khách (design.md mục 4).
     - Người làm: Agent (Terraform), người vận hành (xác nhận)
@@ -258,6 +264,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Phụ thuộc: 5.5, 1.2
     - _Requirements: 8.1, 8.2, 14.1_
   - [ ] 5.7 Deploy bản sample đã vá
+    - Trạng thái 2026-10-29: `tools/package_sample.py` tạo zip tái lập được (51 file, khớp blob đã commit). Phần deploy do người vận hành chạy.
     - Agent đóng gói `vendor/...` thành zip. Người vận hành tải lên CloudShell ở `ap-southeast-1` rồi chạy `scripts/deploy.sh` với các biến: `STACK_PREFIX=kiro-<khách>` (tối đa 20 ký tự), `KIRO_LOGS_BUCKET`, `KIRO_LOGS_PREFIX=kiro/`, `KIRO_SOURCE_ACCOUNT_ID`, `AWS_REGION=ap-southeast-1`, `QS_PRINCIPAL_ARN`. Khi D8 = có thì thêm `IDENTITY_MAPPING=true`, `IDENTITY_STORE_ID`, `IDC_REGION`, `IDC_ROLE_ARN`, `IDC_EXTERNAL_ID`. Kiểm `KMS_KEY_ARN` để trống, vì bucket report dùng SSE-S3. Không đặt `HASH_EMAILS=true` khi đã bật `IDENTITY_MAPPING`. README ghi `deploy.sh` từ chối chạy khi cả hai cùng bật.
     - Người làm: người vận hành
     - Xong khi: hai stack (ba stack nếu D8 = có) ở trạng thái `*_COMPLETE`. Ghi ARN của role normalizer và role identity map vào `config.json`.
@@ -283,6 +290,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
 
 - [ ] 6. Lớp 4: CloudTrail data events (chỉ khi OQ-1 có event)
   - [ ] 6.1 Viết `infra/observability/trail-bucket`
+    - Trạng thái 2026-10-29: module xong, 2 test pass, gồm điều kiện 'không có principal * ngoài Deny'. Region bucket vẫn chờ OQ-11.
     - Bucket, KMS key, bucket policy và key policy theo `design.md` mục 3.4, đặt ở region đã chốt bằng OQ-11. Thêm bảng Athena dùng partition projection. Gắn tag `Project=kiro-monitoring`, `Customer=<khách>`.
     - Người làm: Agent
     - Xong khi: `terraform validate` pass. Plan không có principal `*` ngoài các statement `Deny`.
@@ -294,6 +302,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Phụ thuộc: 6.1
     - _Requirements: 14.2_
   - [ ] 6.3 Viết và apply `infra/customer/trail` **[XÁC NHẬN]**
+    - Trạng thái 2026-10-29: module xong, 3 test pass (chỉ data event, không management event, chặn key ngoài account trung tâm).
     - Selector chỉ lấy data event `AWS::CodeWhisperer::Profile`. Thêm lọc `eventName` theo kết quả OQ-1 nếu giảm được số event. Đặt trail ở region của Kiro profile.
     - Người làm: Agent, người vận hành (xác nhận)
     - Xong khi: `get-event-selectors` không có management event. `get-trail-status` trả `IsLogging: true` và `LatestDeliveryError` rỗng.
@@ -307,6 +316,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
 
 - [ ] 7. Lớp 5: prompt logging
   - [ ] 7.1 Viết và apply `infra/customer/prompt-logs` **[XÁC NHẬN]**
+    - Trạng thái 2026-10-29: module xong, 3 test pass, gồm điều kiện plan không chứa account trung tâm.
     - Bucket SSE-KMS (key policy theo kết quả OQ-9), Block Public Access, chặn kết nối không TLS, lifecycle theo thời gian giữ khách chọn, bảng Athena và role `kiro-prompt-auditor` của khách. Không có principal nào của account trung tâm.
     - Người làm: Agent, người vận hành (xác nhận)
     - Xong khi: plan không có ARN nào chứa `<observability-account-id>`. Apply xong.
@@ -322,13 +332,14 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Xong khi: kết quả là `403`. Ghi vào `BASELINE.md`.
     - Phụ thuộc: 7.2
     - _Requirements: 10.2_
-  - [ ] 7.4 (Chỉ khi D4 = có) Viết Lambda metadata kèm test trước
+  - [x] 7.4 (Chỉ khi D4 = có) Viết Lambda metadata kèm test trước
     - Viết test trước: hai record mẫu từ tài liệu Kiro, một record có cấu trúc lạ. Kiểm output chỉ có khoá trong danh sách trắng (`design.md` mục 3.5), không có chuỗi con nào dài từ 8 ký tự trở lên lấy từ field toàn văn, record lạ bị bỏ, log chỉ có số đếm.
     - Người làm: Agent
     - Xong khi: tất cả test pass.
     - Phụ thuộc: 3.6
     - _Requirements: 11.1, 11.2, 11.3, 11.4, 11.5_
   - [ ] 7.5 (Chỉ khi D4 = có) Deploy Lambda metadata và bucket nhận **[XÁC NHẬN]**
+    - Trạng thái 2026-10-29: module hai phía xong, 4 test pass. Lambda có 9 unit test.
     - `infra/customer/prompt-metadata` và `infra/observability/prompt-metadata`.
     - Người làm: Agent, người vận hành (xác nhận)
     - Xong khi: đọc 1 object trong bucket metadata ở bên vận hành, grep các tên field toàn văn được 0 kết quả.
@@ -337,6 +348,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
 
 - [ ] 8. Nối dữ liệu và dashboard audit (chỉ khi lớp 4 chạy)
   - [ ] 8.1 Viết `tools/build_audit_views.py`
+    - Trạng thái 2026-10-29: tool và 8 test xong, SQL parse được bằng sqlglot (dialect trino). Chờ dữ liệu thật để tạo view.
     - Dùng Athena `CREATE OR REPLACE VIEW kiro_<khách>.kiro_request_audit`, chạy lại nhiều lần vẫn cho cùng kết quả. Cột và khoá nối theo `design.md` mục 3.6, dùng kết quả OQ-2 và OQ-3. View không có `sourceIPAddress` và không có toàn chuỗi `userAgent`.
     - Test: render SQL từ cấu hình, kiểm không có tên cột bị cấm.
     - Người làm: Agent
@@ -344,6 +356,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Phụ thuộc: 6.4, 5.9
     - _Requirements: 12.1, 12.2, 12.3, 12.5_
   - [ ] 8.2 Dựng dashboard `Kiro Request Audit - <khách>` bằng Terraform **[XÁC NHẬN]**
+    - Trạng thái 2026-10-29: module xong, 2 test pass. Định nghĩa dashboard mới qua được schema, chưa được QuickSight thật kiểm.
     - Nếu OQ-2 cho thấy request ID không trùng, thêm dòng chữ trên dashboard: "CloudTrail và prompt log không nối được theo từng request".
     - Người làm: Agent, người vận hành (xác nhận)
     - Xong khi: dashboard có trong `list-dashboards`, dataset có số dòng lớn hơn 0.
@@ -379,6 +392,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Phụ thuộc: 9.1
     - _Requirements: 3.4, 15.1, 15.2, 15.3, 15.4, 15.5_
   - [ ] 9.3 Deploy `infra/observability/freshness` **[XÁC NHẬN]**
+    - Trạng thái 2026-10-29: module và root `infra/roots/shared` xong, 2 test pass.
     - Lambda, EventBridge Scheduler lúc 05:00 UTC, SNS `kiro-mon-alerts`, IAM chỉ đọc S3 và CloudWatch.
     - Người làm: Agent, người vận hành (xác nhận)
     - Xong khi: gọi Lambda bằng tay ở chế độ thử (biến `DRY_RUN=1`, ngày giả lập cũ) thì SNS nhận được một tin. Chạy ở chế độ thật thì không có cảnh báo.
@@ -386,11 +400,11 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - _Requirements: 15.1, 15.5_
 
 - [ ] 10. Bàn giao
-  - [ ] 10.1 Viết `docs/RUNBOOK.md`
+  - [x] 10.1 Viết `docs/RUNBOOK.md`
     - Gồm các quy trình: thêm khách mới, gắn lại bucket policy sau khi CID deploy lại, refresh SPICE bằng tay, nâng cấp sample (vá lại P1-P3 trên commit mới), cách đọc cảnh báo, mẫu Support case xin backfill CUR.
     - Người làm: Agent
     - _Requirements: 18.1, 6.6, 3.3_
-  - [ ] 10.2 Viết `docs/TEARDOWN.md`
+  - [x] 10.2 Viết `docs/TEARDOWN.md`
     - Theo từng lớp, gồm lệnh cho cả account trung tâm lẫn account khách, kèm thứ tự gỡ. Thứ tự là gỡ trail và Lambda metadata trước, sau đó tới bucket. Ghi rõ KMS key của identity map vẫn còn sau teardown của sample.
     - Người làm: Agent
     - _Requirements: 1.5, 18.2, 19.2_
@@ -398,7 +412,8 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Người làm: Agent
     - Xong khi: `BASELINE.md` có đủ các số của Requirement 16. Bảng chi phí trong `design.md` mục 9 không còn dòng **[CHƯA XÁC MINH]** nào chưa có lý do.
     - _Requirements: 16.1, 17.1_
-  - [ ] 10.4 Chạy thử thêm khách thứ hai (chỉ plan)
+  - [x] 10.4 Chạy thử thêm khách thứ hai (chỉ plan)
+    - Trạng thái 2026-10-29: làm bằng `terraform test` với provider giả lập (run `second_customer_needs_no_code_change`), không có plan thật.
     - Tạo `customers/<khách-giả>/config.json` với account giả, chạy `terraform plan` cho các module của bên vận hành.
     - Người làm: Agent
     - Xong khi: plan chỉ thêm resource mang tên khách giả, không sửa resource của khách thật, và không phải đổi dòng code nào.

@@ -1,0 +1,5 @@
+# Copy to customers/<D7>/oq.tfvars (gitignored). D7 = the one account used for the experiment.
+account_id    = "444455556666"
+profile       = "<profile of that account>"
+kiro_region   = "us-east-1"
+bucket_region = "ap-southeast-1" # OQ-11: set to kiro_region if CloudTrail rejects cross-Region delivery

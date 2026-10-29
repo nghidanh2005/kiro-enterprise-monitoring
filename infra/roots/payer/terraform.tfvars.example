@@ -1,0 +1,5 @@
+# Copy to customers/<slug>/payer.tfvars (gitignored). Only when D2 = only Kiro.
+payer_account_id         = "111122223333"
+payer_profile            = "acme-payer"
+observability_account_id = "444455556666"
+destination_region       = "ap-southeast-1"

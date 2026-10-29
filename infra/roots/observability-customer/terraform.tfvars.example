@@ -1,0 +1,21 @@
+# Copy to customers/<slug>/observability.tfvars (gitignored) and fill in.
+observability_account_id = "444455556666"
+slug                     = "acme"
+customer_account_id      = "111122223333" # customer's Kiro account
+kiro_region              = "us-east-1"
+
+# Layer 4: only after OQ-1 shows Kiro emits data events (task 3.6).
+enable_trail_bucket = false
+reader_role_arns    = [] # audit role and QuickSight service role
+glue_database_name  = "kiro_acme"
+
+# D4 and D5.
+enable_prompt_metadata = false
+retention_days         = 395
+
+# Task 8.2, after tools/build_audit_views.py --apply.
+enable_audit_dashboard = false
+display_name           = "ACME"
+quicksight_owner_arn   = "arn:aws:quicksight:ap-southeast-1:444455556666:user/default/admin"
+quicksight_viewer_arns = [] # D1
+request_ids_match      = false # OQ-2

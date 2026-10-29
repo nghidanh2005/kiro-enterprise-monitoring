@@ -5,7 +5,7 @@ Tài liệu này trả lời câu hỏi "làm thế nào" cho các requirement t
 - **[ĐÃ ĐO]**: đọc trong source code ở commit đã ghim, có ghi file và số dòng.
 - **[CHƯA XÁC MINH]**: suy luận, hoặc tài liệu không nói. Mỗi chỗ như vậy có một câu hỏi mở OQ-n ở mục 11.
 
-Chưa có lệnh nào thay đổi gì trên AWS. Ngày 2026-10-29 mọi profile CLI trên máy đều hết hạn, nên Price List API (OQ-8) và khảo sát (task 2.2, 2.3) chưa chạy được. OQ-10 và OQ-12 đã trả lời bằng cách đọc source của CID.
+Chưa có lệnh nào thay đổi gì trên AWS. Ngày 2026-10-29 mọi profile CLI trên máy đều hết hạn, nên khảo sát (task 2.2, 2.3) chưa chạy được. OQ-10 và OQ-12 đã trả lời bằng cách đọc source của CID. OQ-8 đã trả lời từ file giá công khai của AWS, đọc không cần account. Mọi module Terraform đã có test chạy với provider giả lập (`infra/tests`), chưa plan trên account thật.
 
 ---
 
@@ -89,12 +89,18 @@ sequenceDiagram
 | CUDOS | Bên vận hành | Người vận hành | `cid-cmd deploy` trong CloudShell |
 
 Ràng buộc:
-- Export do stack Source của CID tạo ghi vào prefix `cur2/<account nguồn>` trong bucket `<ResourcePrefix>-<account Data Collection>-data-exports` **[ĐÃ ĐO]** (`data-exports/deploy/data-exports-aggregation.yaml` dòng 691-693, commit `c747c93`). Bản trước của mục này ghi `<export-name>/<account nguồn>/...`, sai so với source. Đường dẫn bên dưới prefix đó (thư mục tên export, `data/`, `BILLING_PERIOD=YYYY-MM/`) là cách Data Exports tự đặt **[CHƯA XÁC MINH]**, kiểm lại bằng `list-objects-v2` sau lần giao đầu.
+- Đường dẫn đầy đủ của export do CID tạo là `cur2/<account nguồn>/cid-cur2/data/<thư mục tháng>/*.parquet` trong bucket `<ResourcePrefix>-<account Data Collection>-data-exports`.
+  - Tài liệu CID ghi `<export-name>/<src-account>/<prefix>-<export-name>/data/<month-partition>/` **[ĐÃ ĐỌC]**. Với CUR 2.0 thì `<export-name>` là `cur2` và `<prefix>` mặc định là `cid` **[ĐÃ ĐO]** (`data-exports/deploy/data-exports-aggregation.yaml` dòng 451, 693, 700, commit `c747c93`).
+  - Lượt trước tôi ghi rằng câu cũ `<export-name>/<account nguồn>/...` sai so với source. Ghi như vậy là quá tay: câu cũ đúng nếu hiểu `<export-name>` là `cur2`. Nó chỉ thiếu phần sau account.
+  - Tên thư mục tháng `BILLING_PERIOD=YYYY-MM` **[CHƯA XÁC MINH]**. Kiểm bằng `list-objects-v2` sau lần giao đầu. Lambda freshness nhận prefix này qua cấu hình nên không phải sửa code nếu tên khác.
+- Root `infra/roots/payer` (D2 = chỉ Kiro) dùng đúng tên `cid-cur2` và prefix `cur2/<account payer>`, nên crawler của CID (đường dẫn `cur2/`, dòng 1395) đọc được mà không phải sửa gì.
 - Lần giao đầu mất khoảng 24 giờ, có thể tới 72 giờ. **[ĐÃ ĐỌC]**
 - Backfill tối đa 14 tháng, account payer mở Support case. **[ĐÃ ĐỌC]**
 - Data Exports chỉ có ở `us-east-1`. Khi deploy stack ở region khác, CloudFormation tạo export bằng custom resource. **[ĐÃ ĐỌC]**
 
-**Lọc chỉ Kiro (D2):** query của Data Export hỗ trợ `WHERE` **[ĐÃ ĐỌC]**. Phương án là giữ đủ cột như export của CID, chỉ thêm `WHERE line_item_product_code = 'Kiro'`. Stack Source của CID tạo export với query cố định, nên phải tạo export lọc bằng tay hoặc bằng Terraform. Chưa biết CUDOS và CID có chạy đúng trên CUR đã lọc không (OQ-7).
+**Lọc chỉ Kiro (D2):** query của Data Export hỗ trợ `WHERE` **[ĐÃ ĐỌC]**. Phương án là giữ đủ cột như export của CID, chỉ thêm `WHERE line_item_product_code = 'Kiro'`. Giá trị `'Kiro'` là giá trị mà chính dashboard Kiro của CID dùng để lọc CUR **[ĐÃ ĐO]** (`cloud-intelligence-dashboards-framework` @ `665a416`, `dashboards/kiro-user-activity/kiro-user-activity.yaml` dòng 373-374). Stack Source của CID tạo export với query cố định, nên export lọc được tạo bằng `infra/customer/cur-export`. Chưa biết CUDOS và CID có chạy đúng trên CUR đã lọc không (OQ-7).
+
+**Giao CUR sang account khác khi tạo bằng Terraform** **[CHƯA XÁC MINH]**: CloudFormation của CID có property `S3BucketOwner`, nhưng API Data Exports (botocore 1.42.2) và resource Terraform (provider 6.70.0) đều không có field này. Task 4.1 phải đo việc giao file trước tiên. Nếu không giao được, D2 = chỉ Kiro không làm được bằng Terraform, và phải chọn D2 = toàn bộ qua stack của CID.
 
 **Resource ID trong CUR:** CID đếm license theo Identity Center user ID nằm trong `line_item_resource_id` **[ĐÃ ĐỌC]**. Vì vậy export phải bật "Include resource IDs". Export do CID tạo **có bật** **[ĐÃ ĐO]** (OQ-10): `INCLUDE_RESOURCES: "TRUE"` ở cả hai cách tạo export (`data-exports-aggregation.yaml` dòng 684 và 719), và cả 4 query CUR 2.0 của CID đều chọn cột `line_item_resource_id` (dòng 243-252). Nếu khách đã có export tự tạo, `tools/survey_customer.py` đọc hai điều này từ `get-export`.
 
@@ -221,9 +227,11 @@ Cần thêm statement `s3:GetBucketAcl` cho cùng principal và cùng điều ki
 - Đặt bucket ở region của trail. Athena ở `ap-southeast-1` sẽ đọc S3 khác region và tốn phí truyền dữ liệu.
 - Đặt bucket ở `ap-southeast-1`.
 
-CloudTrail có cho trail ghi vào bucket khác region không: **[CHƯA XÁC MINH]** (OQ-11). Tôi nghiêng về bucket ở `ap-southeast-1` nếu được phép, vì toàn bộ query chạy ở đó.
+CloudTrail có cho trail ghi vào bucket khác region không (OQ-11): có bằng chứng gián tiếp, chưa có câu nào nói thẳng. FAQ của CloudTrail ghi rằng trail multi-region giao log của mọi region vào "a single S3 bucket" **[ĐÃ ĐỌC]**, tức CloudTrail vốn đã ghi log của region này vào bucket ở region khác. Với trail một region thì vẫn **[CHƯA XÁC MINH]**. Root thử `infra/experiments/oq` đặt bucket ở `ap-southeast-1` để đo thẳng. Nếu bị từ chối thì đổi `bucket_region` về region của trail.
 
-Bảng Athena dùng partition projection theo `region`, `year`, `month`, `day` trên đường dẫn `AWSLogs/<account>/CloudTrail/<region>/<yyyy>/<mm>/<dd>/`. Không dùng crawler.
+Bảng Athena `cloudtrail_kiro` dùng partition projection theo `region` (enum, đúng region của trail) và `timestamp` (`yyyy/MM/dd`) trên đường dẫn `AWSLogs/<account>/CloudTrail/<region>/<yyyy>/<mm>/<dd>/`. Đây là bố cục của bảng mẫu trong Athena user guide **[ĐÃ ĐỌC]**, 29 cột, SerDe `org.apache.hive.hcatalog.data.JsonSerDe`, input format `com.amazon.emr.cloudtrail.CloudTrailInputFormat`. Không dùng crawler.
+
+User ID trong CloudTrail: ví dụ event IDE của Amazon Q Developer trên re:Post có `userIdentity.type = IdentityCenterUser` và `userIdentity.onBehalfOf.userId`, kèm `identityStoreArn` **[ĐÃ ĐỌC]**. Cột tương ứng trong bảng là `useridentity.onbehalfof.userid`. Kiro có giữ đúng dạng này không là OQ-3.
 
 ### 3.5 Lớp 5: prompt logging
 
@@ -236,7 +244,8 @@ Bảng Athena dùng partition projection theo `region`, `year`, `month`, `day` t
 | Bucket `kiro-mon-promptmeta-<khách>-<observability-account-id>` | Bên vận hành | `infra/observability/prompt-metadata` |
 
 - Bucket policy cho Kiro ghi theo mẫu tài liệu: principal `q.amazonaws.com`, `s3:PutObject`, điều kiện `aws:SourceAccount` và `aws:SourceArn` dạng `arn:aws:codewhisperer:<region>:<account>:*` **[ĐÃ ĐỌC]**.
-- Prompt log có dùng KMS key được: tài liệu Kiro nhắc tới phí của KMS key tuỳ chọn **[ĐÃ ĐỌC]**. Tài liệu không nêu key policy cụ thể cho `q.amazonaws.com`. Phải thử ở OQ-9 trước khi áp cho khách.
+- Prompt log có dùng KMS key được: tài liệu Kiro nhắc tới phí của KMS key tuỳ chọn **[ĐÃ ĐỌC]**. Tài liệu Kiro không nêu key policy. Tài liệu prompt logging của Amazon Q Developer thì có **[ĐÃ ĐỌC]**: cho `q.amazonaws.com` quyền `kms:GenerateDataKey`, điều kiện `aws:SourceAccount` và `aws:SourceArn` dạng `arn:aws:codewhisperer:<region>:<account>:*`. Module `infra/customer/prompt-logs` dùng đúng statement đó. Kiro có dùng chung cơ chế này không vẫn phải đo ở OQ-9.
+- Cũng tài liệu Q Developer đó ghi đường dẫn log là `<prefix>/AWSLogs/<account>/QDeveloperLogs/<log-type>/<region>/<y>/<m>/<d>/<hour>/<file>.gz/<file>.json` **[ĐÃ ĐỌC]**, và ghi rằng prompt logging không hỗ trợ user được subscribe ở member account của Organization. Tài liệu Kiro không nói hai điều này. Nếu Kiro cũng giới hạn như vậy, khách có user ở member account sẽ không có lớp 5. Phải hỏi khách user được subscribe ở account nào (task 2.2), và đo ở OQ-9.
 - Chưa đo độ trễ từ lúc chat tới lúc file prompt log xuất hiện (OQ-9).
 
 **Metadata prompt: danh sách field được phép.** Đây là danh sách trắng. Field nào không có tên ở đây thì không được ra khỏi account khách.
@@ -409,9 +418,9 @@ Mỗi khách có một Terraform state riêng cho mỗi account: `customers/<kh�
 |---|---|---|---|
 | Pipeline sample | Bên vận hành | khoảng 0,05 USD/tháng | Số đo 30 ngày trong README sample |
 | KMS key identity map | Bên vận hành | 1 USD/tháng, key vẫn còn sau teardown | README sample |
-| KMS key bucket CloudTrail | Bên vận hành | 1 USD/tháng cộng phí request | Giá KMS **[CHƯA XÁC MINH]** lượt này |
+| KMS key bucket CloudTrail | Bên vận hành | 1 USD/tháng cho mỗi key, cộng 0,03 USD cho 10.000 request | Price List, `ap-southeast-1-KMS-Keys` và `ap-southeast-1-KMS-Requests`, bản công bố 2026-10-26 (OQ-8) |
 | Lưu CUR | Bên vận hành | dưới 10 USD/tháng với tổ chức cỡ vừa | Tài liệu CID |
-| CloudTrail data event | Khách (người sở hữu trail) | khoảng 0,10 USD cho 100.000 event, nhân với số event | **[CHƯA XÁC MINH]**: đơn giá (OQ-8) và số event (OQ-1) |
+| CloudTrail data event | Khách (người sở hữu trail) | 0,10 USD cho 100.000 event, nhân với số event | Đơn giá đã đo (OQ-8): 0,000001 USD mỗi event ở cả `USE1-DataEventsRecorded`, `EUC1-DataEventsRecorded` và `APS1-DataEventsRecorded`, bản công bố 2026-09-11. Số event mỗi câu chat **[CHƯA XÁC MINH]** (OQ-1) |
 | Prompt log, KMS key của khách | Khách | phí S3 và KMS | Tài liệu Kiro |
 | QuickSight reader | Bên vận hành | khoảng 3 USD/reader/tháng (suy từ README: 1 author + 25 reader = 99 USD) | README sample |
 | Phí 250 USD/tháng của QuickSight | Account trung tâm | chỉ phát sinh khi account có user Pro hoặc đã bật Amazon Q in QuickSight, kiểm ở task 2.3 | README sample |
@@ -444,10 +453,10 @@ Lưu ý:
 | OQ-5 | Bucket report của khách mã hoá kiểu gì, prefix nào, report sớm nhất ngày nào | Lớp 2, 3 | Khảo sát (task 2) |
 | OQ-6 | Khách đã có CUR chưa, ở account nào, từ tháng nào, có resource ID không | Lớp 1, 2 | Khảo sát |
 | OQ-7 | CUDOS và CID có chạy đúng trên CUR chỉ còn dòng Kiro không | D2 | Thử trên account trung tâm: tạo export lọc, deploy CUDOS và CID trên đó, so với export đầy đủ |
-| OQ-8 | Đơn giá CloudTrail data event ở region Kiro profile | Báo giá | Price List API, `ServiceCode=AWSCloudTrail` |
-| OQ-9 | Prompt log có ghi được vào bucket SSE-KMS không, cần key policy gì, độ trễ bao lâu | Lớp 5 | Bucket tạm có KMS, chat thử, đo thời gian |
+| OQ-8 | Đơn giá CloudTrail data event ở region Kiro profile | Báo giá | **Đã đo 2026-10-29:** 0,000001 USD mỗi event (0,10 USD cho 100.000) ở `us-east-1`, `eu-central-1` và `ap-southeast-1`. Nguồn là file giá công khai `offers/v1.0/aws/AWSCloudTrail/current/index.json`, bản công bố 2026-09-11, đọc không cần account |
+| OQ-9 | Prompt log có ghi được vào bucket SSE-KMS không, cần key policy gì, độ trễ bao lâu | Lớp 5 | Bucket tạm có KMS, chat thử, đo thời gian. Key policy dự kiến lấy từ tài liệu Q Developer (mục 3.5); độ trễ và việc Kiro có theo đúng cơ chế đó vẫn chưa đo |
 | OQ-10 | Export CUR của CID có bật resource ID không | Đếm license của CID | **Đã đo 2026-10-29: có.** `INCLUDE_RESOURCES: "TRUE"`, `data-exports-aggregation.yaml` dòng 684 và 719 (mục 3.1) |
-| OQ-11 | Trail ở `us-east-1` có ghi vào bucket ở `ap-southeast-1` được không | Region của bucket CloudTrail | Đọc tài liệu CloudTrail, thử bằng trail tạm |
+| OQ-11 | Trail ở `us-east-1` có ghi vào bucket ở `ap-southeast-1` được không | Region của bucket CloudTrail | Bằng chứng gián tiếp: trail multi-region giao mọi region vào một bucket (mục 3.4). Đo thẳng bằng `infra/experiments/oq` |
 | OQ-12 | Collector CID có ghi lỗi truy cập ra CloudWatch Logs không | Cảnh báo collector | **Đã đo 2026-10-29: có, nhưng chỉ trong dòng JSON kết quả, không làm tăng metric `Errors`.** `module-kiro-user-activity.yaml` dòng 435-447 (mục 3.7) |
 | OQ-13 | Lịch refresh SPICE của dataset CID Kiro | Giờ dữ liệu có trên dashboard | Đọc dataset sau khi `cid-cmd deploy` |
 
@@ -486,6 +495,16 @@ Lưu ý:
 - [CloudTrail: data event cho CodeWhisperer profile](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-data-events-with-cloudtrail.html#:~:text=Amazon%20CodeWhisperer%20API%20activity%20on%20a%20profile)
 - [CloudTrail: gửi log nhiều account vào một bucket](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-receive-logs-from-multiple-accounts.html#:~:text=deliver%20log%20files%20from%20multiple%20AWS%20accounts%20into%20a%20single%20Amazon%20S3%20bucket)
 - [CloudTrail: bucket policy cho nhiều account](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-set-bucket-policy-for-multiple-accounts.html#:~:text=its%20bucket%20policy%20must%20grant%20CloudTrail%20permission%20to%20write%20log%20files%20from%20all%20the%20accounts)
+- [CloudTrail: KMS key policy cho trail, điều kiện aws:SourceArn](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/create-kms-key-policy-for-cloudtrail.html#:~:text=add%20an%20aws%3ASourceArn%20condition%20key%20to%20the%20KMS%20key%20policy)
+- [CloudTrail: bucket lỗi thì giao lại 30 ngày và vẫn tính phí](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/create-s3-bucket-policy-for-cloudtrail.html#:~:text=CloudTrail%20will%20attempt%20to%20redeliver%20the%20log%20files%20to%20your%20S3%20bucket%20for%2030%20days)
+- [CloudTrail FAQ: trail multi-region giao vào một bucket (OQ-11, gián tiếp)](https://aws.amazon.com/cloudtrail/faqs/#:~:text=deliver%20log%20files%20containing%20account%20activity%20across%20all%20Regions%20to%20a%20single%20S3%20bucket)
+- [Athena: bảng CloudTrail dùng partition projection](https://docs.aws.amazon.com/athena/latest/ug/create-cloudtrail-table-partition-projection.html#:~:text=automatically%20uses%20partition%20projection%20on%20CloudTrail%20logs)
+- [re:Post: event IDE có userIdentity.onBehalfOf và userAgent](https://repost.aws/knowledge-center/log-amazonq-developer-events#:~:text=Events%20that%20your%20IDE%20provides%20include%20details%20about)
+- [Q Developer: key policy KMS cho bucket prompt log](https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/q-admin-prompt-logging.html#:~:text=configuring%20SSE%2DKMS%20on%20the%20bucket%2C%20add%20the%20following%20policy%20on%20the%20KMS)
+- [Q Developer: prompt logging không hỗ trợ user ở member account](https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/q-admin-prompt-logging.html#:~:text=Currently%2C%20Q%20Developer%20does%20not%20support%20logging%20the%20prompts)
+- [CID Data Exports: cấu trúc thư mục của từng export](https://docs.aws.amazon.com/guidance/latest/cloud-intelligence-dashboards/data-exports.html#:~:text=Each%20individual%20Data%20Export%20has%20a%20prefix)
+- [CID Data Exports: mẫu Support case xin backfill](https://docs.aws.amazon.com/guidance/latest/cloud-intelligence-dashboards/data-exports.html#:~:text=Please%20can%20you%20backfill%20the%20data%20in%20DataExport)
+- File giá công khai, không cần account: `https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AWSCloudTrail/current/index.json` (bản 2026-09-11) và `.../awskms/current/index.json` (bản 2026-10-26).
 - Source đã đo:
   - `aws-samples/sample-kiro-user-analytics-quicksight-dashboard` @ `1f5f5b8`: `cfn/01-data-layer.yaml`, `cfn/03-identity-mapping.yaml`, `scripts/deploy.sh`, `scripts/preflight.sh`, `scripts/normalize_report_lambda.py`, `scripts/identity_map_lambda.py`, `scripts/build_views.py`, `README.md`.
   - `awslabs/cid-data-collection-framework` @ `main` (2026-10-29, template trỏ `v3.14.10`): `data-collection/deploy/module-kiro-user-activity.yaml`, `data-collection/deploy/deploy-data-collection.yaml`.

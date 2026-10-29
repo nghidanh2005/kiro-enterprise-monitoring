@@ -103,52 +103,43 @@ data "archive_file" "code" {
   output_path = "${path.module}/.build/freshness.zip"
 }
 
-data "aws_iam_policy_document" "lambda_trust" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["lambda.amazonaws.com"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [local.account_id]
-    }
-  }
-}
+locals {
+  lambda_trust = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Action    = "sts:AssumeRole"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Condition = { StringEquals = { "aws:SourceAccount" = local.account_id } }
+    }]
+  })
 
-data "aws_iam_policy_document" "lambda" {
-  statement {
-    sid       = "ListMonitoredBuckets"
-    actions   = ["s3:ListBucket"]
-    resources = [for b in local.buckets : "${local.arn_prefix}:s3:::${b}"]
-  }
-  statement {
-    sid       = "ReadCollectorResultLines"
-    actions   = ["logs:FilterLogEvents"]
-    resources = [local.collector_log]
-  }
-  statement {
-    sid       = "ReadLambdaErrorMetric"
-    actions   = ["cloudwatch:GetMetricStatistics"]
-    resources = ["*"] # GetMetricStatistics does not support resource-level permissions
-  }
-  statement {
-    sid       = "PublishAlerts"
-    actions   = ["sns:Publish"]
-    resources = [aws_sns_topic.alerts.arn]
-  }
-  statement {
-    sid       = "OwnLogs"
-    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
-    resources = [local.own_log]
-  }
+  lambda_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      { Sid = "ListMonitoredBuckets", Effect = "Allow", Action = "s3:ListBucket", Resource = [for b in local.buckets : "${local.arn_prefix}:s3:::${b}"] },
+      { Sid = "ReadCollectorResultLines", Effect = "Allow", Action = "logs:FilterLogEvents", Resource = local.collector_log },
+      # GetMetricStatistics does not support resource-level permissions.
+      { Sid = "ReadLambdaErrorMetric", Effect = "Allow", Action = "cloudwatch:GetMetricStatistics", Resource = "*" },
+      { Sid = "PublishAlerts", Effect = "Allow", Action = "sns:Publish", Resource = aws_sns_topic.alerts.arn },
+      { Sid = "OwnLogs", Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = local.own_log },
+    ]
+  })
+
+  scheduler_trust = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Action    = "sts:AssumeRole"
+      Principal = { Service = "scheduler.amazonaws.com" }
+      Condition = { StringEquals = { "aws:SourceAccount" = local.account_id } }
+    }]
+  })
 }
 
 resource "aws_iam_role" "lambda" {
   name                 = "${local.fn_name}-lambda"
-  assume_role_policy   = data.aws_iam_policy_document.lambda_trust.json
+  assume_role_policy   = local.lambda_trust
   permissions_boundary = var.permissions_boundary_arn
   tags                 = local.tags
 }
@@ -156,7 +147,7 @@ resource "aws_iam_role" "lambda" {
 resource "aws_iam_role_policy" "lambda" {
   name   = "freshness-read-and-alert"
   role   = aws_iam_role.lambda.id
-  policy = data.aws_iam_policy_document.lambda.json
+  policy = local.lambda_policy
 }
 
 resource "aws_cloudwatch_log_group" "fn" {
@@ -188,24 +179,9 @@ resource "aws_lambda_function" "freshness" {
   tags       = local.tags
 }
 
-data "aws_iam_policy_document" "scheduler_trust" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["scheduler.amazonaws.com"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [local.account_id]
-    }
-  }
-}
-
 resource "aws_iam_role" "scheduler" {
   name                 = "${local.fn_name}-scheduler"
-  assume_role_policy   = data.aws_iam_policy_document.scheduler_trust.json
+  assume_role_policy   = local.scheduler_trust
   permissions_boundary = var.permissions_boundary_arn
   tags                 = local.tags
 }

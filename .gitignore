@@ -25,6 +25,12 @@ vendor/**/.venv/
 
 # Build and transfer artifacts
 *.zip
+dist/
+.build/
+
+# Lock files created by an offline `terraform init -plugin-dir` hold local,
+# Windows-only hashes and break other platforms. Generate them online instead.
+.terraform.lock.hcl
 
 # draw.io temporary backups
 .$*.bkp
