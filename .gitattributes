@@ -1,0 +1,4 @@
+# The vendored sample must stay byte-equal to upstream (plus documented patches).
+# deploy.sh / preflight.sh break under bash if checked out with CRLF.
+vendor/** -text
+*.sh text eol=lf

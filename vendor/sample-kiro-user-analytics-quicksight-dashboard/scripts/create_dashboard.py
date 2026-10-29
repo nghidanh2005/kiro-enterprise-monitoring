@@ -1,0 +1,2045 @@
+#!/usr/bin/env python3
+"""
+Create (or update) the Kiro QuickSight Analysis and published Dashboard
+via boto3. AWS CloudFormation provisions the DataSource and DataSets
+(see cfn/02-quicksight.yaml); this script assembles the QuickSight
+Definition payload in Python, which keeps the visual configuration
+easy to edit and review.
+
+Usage:
+    python scripts/create_dashboard.py \\
+        --account-id 123456789012 \\
+        --region us-east-1 \\
+        --principal-arn arn:aws:quicksight:us-east-1:123456789012:user/default/me
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+
+import boto3
+from botocore.exceptions import ClientError
+
+DEFAULT_ASSET_ID = "kiro-user-analytics"
+DEFAULT_NAME = "Kiro User Analytics"
+# The STACK_PREFIX that deploy.sh itself defaults to. A deployment using it is
+# "the" deployment and keeps the plain name; anything else is a parallel
+# deployment and gets the prefix appended (see asset_name).
+DEFAULT_RESOURCE_PREFIX = "kiro-analytics"
+
+
+def asset_name(resource_prefix: str, override: str | None = None) -> str:
+    """Display name for the Analysis and Dashboard.
+
+    The asset ID is namespaced per deployment, but the display NAME was a fixed
+    constant - so several deployments in one account (dev/prod, per-Region, per-
+    org-unit) all appeared in the QuickSight console as identical rows titled
+    "Kiro User Analytics", indistinguishable without opening each one.
+
+    The prefix is appended for any non-default deployment, which guarantees
+    uniqueness because STACK_PREFIX is also the CloudFormation stack name and so
+    cannot collide. The default deployment keeps the plain name, since
+    "Kiro User Analytics (kiro-analytics)" is just noise when there is only one.
+    """
+    if override:
+        return override[:2048]
+    if resource_prefix and resource_prefix != DEFAULT_RESOURCE_PREFIX:
+        return f"{DEFAULT_NAME} ({resource_prefix})"[:2048]
+    return DEFAULT_NAME
+
+# Dataset identifier suffixes. Combined with --resource-prefix to form the
+# full DataSetId at build time. Must match the IDs minted by cfn/02-quicksight.yaml.
+DATASET_SUFFIXES = {
+    "base":         "base-user-activity",
+    "dense":        "user-daily-dense",
+    "trends":       "daily-trends",
+    "users":        "user-totals",
+    "tiers":        "tier-breakdown",
+    "movers":       "wow-movers",
+    "models":       "model-usage",
+    "heatmap":      "activity-heatmap",
+}
+# NOTE: the People engagement funnel was reworked from the native funnel chart
+# (which read the `engagement-funnel` SPICE dataset) to three date-range-driven
+# KPI tiles computed from `base` (see funnel_geN_user calc fields). The
+# `engagement-funnel` dataset, its refresh schedule, and the underlying Athena
+# view (formerly athena/08_engagement_funnel.sql) have all been removed; the
+# funnel now depends only on base-user-activity.
+
+
+def dataset_arn(account_id: str, region: str, dataset_id: str) -> str:
+    return f"arn:aws:quicksight:{region}:{account_id}:dataset/{dataset_id}"
+
+
+# Auto-abbreviated number format (12345678 -> 12.3M, 12345 -> 12.3K). Applied
+# to KPI tile values so customers with millions of messages don't see raw
+# digits. QS picks the appropriate scale automatically with NumberScale: AUTO.
+_AUTO_NUMBER_FORMAT = {
+    "FormatConfiguration": {
+        "NumberDisplayFormatConfiguration": {
+            "NumberScale": "AUTO",
+            "DecimalPlacesConfiguration": {"DecimalPlaces": 1},
+        },
+    },
+}
+
+# Fixed colors for the two recurring categorical dimensions, so a given tier /
+# client is the SAME color on every sheet (otherwise QuickSight assigns palette
+# slots per-visual by alphabetical category order, and e.g. "Power" can be one
+# color on Activity and another on Economics). Colors are drawn from the theme
+# DataColorPalette (cfn/02-quicksight.yaml). Values must match what the views
+# emit: tier is normalized to friendly labels by tier_label_expr in
+# build_views.py (Free/Pro/Pro+/Pro Max/Power/Unknown),
+# client_type is upper()'d (KIRO_IDE/KIRO_CLI/PLUGIN). A value not in the map
+# falls back to normal palette assignment, so new client types still render.
+# Kiro brand purple - the "primary/now/headline" convention. Used for the Power
+# tier, and as the explicit fill for single-series bars (which would otherwise
+# inherit palette slot 1).
+_BRAND_PURPLE = "#9046FF"
+# Secondary/"prior/other" convention colour, paired with brand purple on
+# two-series charts (e.g. new vs returning, in-plan vs overage).
+_BRAND_ORANGE = "#FF8C00"
+
+# One hue, one meaning. Kiro purple #9046FF is reserved for Power tier ONLY
+# (and the "primary/now" UI convention) - it is deliberately NOT reused as a
+# client color or in the auto/model palette, so a viewer never sees the same
+# swatch mean two different things on one sheet. Tier and client now share ZERO
+# hexes. Pro uses a LIGHT blue (#4DA6FF) rather than #0972D3 so it stays
+# distinguishable from Power-purple under protanopia (purple/blue converge for
+# red-blind viewers; the lightness gap rescues it).
+# Keep the keys in sync with _TIER_LABELS in build_views.py (the raw ->
+# display-label mapping the views apply). A label with no entry here still
+# renders, just from the auto palette.
+# Kiro's four tiers, cheapest to richest. There is no Free entry: Free exists
+# only on Builder IDs, and this dashboard reports on an enterprise Kiro
+# subscription, where Pro is the entry plan - so a Free row cannot appear in
+# the export. (If one ever did, the fallback in tier_label_expr would still
+# render it as 'Free'; it would just pick a colour from the auto palette.)
+_TIER_COLORS = {
+    "Pro":     "#4DA6FF",   # light cyan-blue (separates from Power-purple under CVD)
+    "Pro+":    "#E7157B",   # magenta
+    "Pro Max": "#C77F00",   # burnt orange (distinct from Warning/CLI #FF8C00)
+    "Power":   "#9046FF",   # Kiro purple - the ONE reserved meaning of brand purple
+    "Unknown": "#8C8C8C",   # grey - de-emphasized
+}
+_CLIENT_COLORS = {
+    "KIRO_IDE": "#0972D3",  # AWS blue - the dominant surface (moved OFF brand purple)
+    "KIRO_CLI": "#FF8C00",  # warm orange
+    "PLUGIN":   "#00A4A6",  # teal (moved off blue so it no longer clashes with IDE)
+}
+# Map a color dimension's column name -> its fixed value/color dict, so helpers
+# can auto-apply the right ColorMap when they color/stack by that column.
+_FIXED_COLOR_COLUMNS = {
+    "subscription_tier": _TIER_COLORS,
+    "client_type":       _CLIENT_COLORS,
+}
+
+
+def _color_map(field_id: str, color_col: str) -> list[dict]:
+    """VisualPalette.ColorMap entries pinning each known value of `color_col`
+    to its fixed color. Returns [] for columns without a fixed mapping (the
+    visual then uses normal theme-palette assignment)."""
+    colors = _FIXED_COLOR_COLUMNS.get(color_col)
+    if not colors:
+        return []
+    return [
+        {"Element": {"FieldId": field_id, "FieldValue": value}, "Color": color}
+        for value, color in colors.items()
+    ]
+
+
+def _kpi(visual_id: str, title: str, dataset: str, column: str, agg: str = "SUM"):
+    return {
+        "KPIVisual": {
+            "VisualId": visual_id,
+            "Title": {"Visibility": "VISIBLE", "FormatText": {"PlainText": title}},
+            "ChartConfiguration": {
+                "FieldWells": {
+                    "Values": [{
+                        "NumericalMeasureField": {
+                            "FieldId": f"{visual_id}-v",
+                            "Column": {"DataSetIdentifier": dataset, "ColumnName": column},
+                            "AggregationFunction": {"SimpleNumericalAggregation": agg},
+                            "FormatConfiguration": _AUTO_NUMBER_FORMAT,
+                        },
+                    }],
+                },
+            },
+        },
+    }
+
+
+def _kpi_calc(visual_id: str, title: str, dataset: str, calc_field: str):
+    """KPI over a pre-aggregated calculated field (e.g. active_days_calc =
+    distinct_count(activity_date)). QS rejects an AggregationFunction on an
+    aggregate calc field, so we omit it. No trend group: the primary value is
+    the field evaluated over the whole selected window (NOT the last day)."""
+    return {
+        "KPIVisual": {
+            "VisualId": visual_id,
+            "Title": {"Visibility": "VISIBLE", "FormatText": {"PlainText": title}},
+            "ChartConfiguration": {
+                "FieldWells": {
+                    "Values": [{
+                        "NumericalMeasureField": {
+                            "FieldId": f"{visual_id}-v",
+                            "Column": {"DataSetIdentifier": dataset, "ColumnName": calc_field},
+                            "FormatConfiguration": _AUTO_NUMBER_FORMAT,
+                        },
+                    }],
+                },
+            },
+        },
+    }
+
+
+def _kpi_distinct_count(visual_id: str, title: str, dataset: str, column: str):
+    return {
+        "KPIVisual": {
+            "VisualId": visual_id,
+            "Title": {"Visibility": "VISIBLE", "FormatText": {"PlainText": title}},
+            "ChartConfiguration": {
+                "FieldWells": {
+                    "Values": [{
+                        "CategoricalMeasureField": {
+                            "FieldId": f"{visual_id}-v",
+                            "Column": {"DataSetIdentifier": dataset, "ColumnName": column},
+                            "AggregationFunction": "DISTINCT_COUNT",
+                        },
+                    }],
+                },
+            },
+        },
+    }
+
+
+def _bar_color(chart: dict, visual_id: str, dataset: str, category_col: str,
+               fieldwells_key: str = "BarChartAggregatedFieldWells") -> None:
+    """Give a single-measure bar chart a brand-purple fill instead of letting
+    it inherit palette slot 1 (now green). Pins the whole series to brand
+    purple (the 'primary' convention). We deliberately do NOT colour each bar
+    by its category: when the category is also the only dimension, QuickSight
+    rejects adding it to the Colors well too ("multiple dimension fields cannot
+    point to the same column"), and the category is already on the axis. Mutates
+    `chart` in place."""
+    chart["VisualPalette"] = {"ChartColor": _BRAND_PURPLE}
+
+
+def _bar(visual_id: str, title: str, dataset: str, category_col: str, value_col: str,
+         items_limit: int | None = None):
+    chart = {
+        "FieldWells": {
+            "BarChartAggregatedFieldWells": {
+                "Category": [{
+                    "CategoricalDimensionField": {
+                        "FieldId": f"{visual_id}-c",
+                        "Column": {"DataSetIdentifier": dataset, "ColumnName": category_col},
+                    },
+                }],
+                "Values": [{
+                    "NumericalMeasureField": {
+                        "FieldId": f"{visual_id}-v",
+                        "Column": {"DataSetIdentifier": dataset, "ColumnName": value_col},
+                        "AggregationFunction": {"SimpleNumericalAggregation": "SUM"},
+                    },
+                }],
+            },
+        },
+        "Orientation": "HORIZONTAL",
+        "SortConfiguration": {
+            "CategorySort": [{
+                "FieldSort": {"FieldId": f"{visual_id}-v", "Direction": "DESC"},
+            }],
+        },
+    }
+    _bar_color(chart, visual_id, dataset, category_col)
+    if items_limit:
+        chart["SortConfiguration"]["CategoryItemsLimit"] = {
+            "ItemsLimit": items_limit,
+        }
+    return {
+        "BarChartVisual": {
+            "VisualId": visual_id,
+            "Title": {"Visibility": "VISIBLE", "FormatText": {"PlainText": title}},
+            "ChartConfiguration": chart,
+        },
+    }
+
+
+def _bar_calc(visual_id: str, title: str, dataset: str, category_col: str,
+              calc_field: str, percent: bool = False):
+    """Horizontal bar whose value is a pre-aggregated calculated field (e.g.
+    credits_per_user computed as sum/distinctCount). Calculated aggregate
+    fields take NO AggregationFunction - QS evaluates them at the category
+    grouping level. `percent` renders a 0-1 calc field as XX.X%."""
+    fmt = (
+        {"FormatConfiguration": {"PercentageDisplayFormatConfiguration": {
+            "DecimalPlacesConfiguration": {"DecimalPlaces": 1}}}}
+        if percent else
+        {"FormatConfiguration": _AUTO_NUMBER_FORMAT}
+    )
+    value_field = {
+        "FieldId": f"{visual_id}-v",
+        "Column": {"DataSetIdentifier": dataset, "ColumnName": calc_field},
+    }
+    value_field.update(fmt)
+    chart = {
+        "FieldWells": {
+            "BarChartAggregatedFieldWells": {
+                "Category": [{
+                    "CategoricalDimensionField": {
+                        "FieldId": f"{visual_id}-c",
+                        "Column": {"DataSetIdentifier": dataset, "ColumnName": category_col},
+                    },
+                }],
+                "Values": [{"NumericalMeasureField": value_field}],
+            },
+        },
+        "Orientation": "HORIZONTAL",
+        "SortConfiguration": {
+            "CategorySort": [{
+                "FieldSort": {"FieldId": f"{visual_id}-v", "Direction": "DESC"},
+            }],
+        },
+    }
+    _bar_color(chart, visual_id, dataset, category_col)
+    return {
+        "BarChartVisual": {
+            "VisualId": visual_id,
+            "Title": {"Visibility": "VISIBLE", "FormatText": {"PlainText": title}},
+            "ChartConfiguration": chart,
+        },
+    }
+
+
+def _pie(visual_id: str, title: str, dataset: str, category_col: str, value_col: str):
+    return {
+        "PieChartVisual": {
+            "VisualId": visual_id,
+            "Title": {"Visibility": "VISIBLE", "FormatText": {"PlainText": title}},
+            "ChartConfiguration": {
+                "FieldWells": {
+                    "PieChartAggregatedFieldWells": {
+                        "Category": [{
+                            "CategoricalDimensionField": {
+                                "FieldId": f"{visual_id}-c",
+                                "Column": {"DataSetIdentifier": dataset, "ColumnName": category_col},
+                            },
+                        }],
+                        "Values": [{
+                            "NumericalMeasureField": {
+                                "FieldId": f"{visual_id}-v",
+                                "Column": {"DataSetIdentifier": dataset, "ColumnName": value_col},
+                                "AggregationFunction": {"SimpleNumericalAggregation": "SUM"},
+                            },
+                        }],
+                    },
+                },
+                "DonutOptions": {"ArcOptions": {"ArcThickness": "MEDIUM"}},
+            },
+        },
+    }
+
+
+def _pie_count(visual_id: str, title: str, dataset: str, category_col: str, count_col: str):
+    return {
+        "PieChartVisual": {
+            "VisualId": visual_id,
+            "Title": {"Visibility": "VISIBLE", "FormatText": {"PlainText": title}},
+            "ChartConfiguration": {
+                "FieldWells": {
+                    "PieChartAggregatedFieldWells": {
+                        "Category": [{
+                            "CategoricalDimensionField": {
+                                "FieldId": f"{visual_id}-c",
+                                "Column": {"DataSetIdentifier": dataset, "ColumnName": category_col},
+                            },
+                        }],
+                        "Values": [{
+                            "CategoricalMeasureField": {
+                                "FieldId": f"{visual_id}-v",
+                                "Column": {"DataSetIdentifier": dataset, "ColumnName": count_col},
+                                "AggregationFunction": "DISTINCT_COUNT",
+                            },
+                        }],
+                    },
+                },
+                # Default to value-DESC so larger wedges come first instead
+                # of alphabetical category order.
+                "SortConfiguration": {
+                    "CategorySort": [{
+                        "FieldSort": {"FieldId": f"{visual_id}-v", "Direction": "DESC"},
+                    }],
+                },
+                "DonutOptions": {"ArcOptions": {"ArcThickness": "MEDIUM"}},
+                # Pin fixed colors when the category is a known dimension
+                # (subscription_tier); segment_calc and other categories fall
+                # back to the theme palette (empty ColorMap is omitted).
+                **({"VisualPalette": {"ColorMap": _color_map(f"{visual_id}-c", category_col)}}
+                   if _color_map(f"{visual_id}-c", category_col) else {}),
+            },
+        },
+    }
+
+
+def _sub(visual: dict, subtitle: str) -> dict:
+    """Attach a one-liner subtitle to any visual produced by the helpers below.
+    Subtitle sits next to Title inside the inner visual dict (KPIVisual /
+    BarChartVisual / etc.) and renders as a small caption under the title."""
+    inner_key = next(iter(visual))
+    visual[inner_key]["Subtitle"] = {
+        "Visibility": "VISIBLE",
+        "FormatText": {"PlainText": subtitle},
+    }
+    return visual
+
+
+# --- Executive-page helpers ---------------------------------------------------
+
+def _bar_time_stacked(visual_id: str, title: str, dataset: str, date_col: str,
+                      value_col: str, stack_col: str | None = None,
+                      arrangement: str = "STACKED", agg: str = "SUM"):
+    """Vertical bar over a daily date axis, optionally split by `stack_col`.
+    Bars rather than an area or line chart on purpose: sparse data reads as
+    discrete per-day values instead of a filled area or an interpolated line
+    that invents usage on days with no data. `arrangement` is STACKED or CLUSTERED - use CLUSTERED
+    when the split series must NOT be summed (e.g. distinct active users by
+    client, where a cross-client user would be double-counted by a stack)."""
+    field_wells = {
+        "Category": [{
+            "DateDimensionField": {
+                "FieldId": f"{visual_id}-d",
+                "Column": {"DataSetIdentifier": dataset, "ColumnName": date_col},
+                "DateGranularity": "DAY",
+            },
+        }],
+        "Values": [{
+            "NumericalMeasureField": {
+                "FieldId": f"{visual_id}-v",
+                "Column": {"DataSetIdentifier": dataset, "ColumnName": value_col},
+                "AggregationFunction": {"SimpleNumericalAggregation": agg},
+            },
+        }],
+    }
+    bar_config = {
+        "BarsArrangement": arrangement,
+        "Orientation": "VERTICAL",
+        "FieldWells": {"BarChartAggregatedFieldWells": field_wells},
+        # Bar charts default to sorting categories by value DESC, which on a
+        # time axis scrambles the days (May 12, 14, 13...). Force chronological
+        # order by sorting the date category ascending.
+        "SortConfiguration": {
+            "CategorySort": [{
+                "FieldSort": {"FieldId": f"{visual_id}-d", "Direction": "ASC"},
+            }],
+        },
+    }
+    if stack_col:
+        field_wells["Colors"] = [{
+            "CategoricalDimensionField": {
+                "FieldId": f"{visual_id}-c",
+                "Column": {"DataSetIdentifier": dataset, "ColumnName": stack_col},
+            },
+        }]
+        cmap = _color_map(f"{visual_id}-c", stack_col)
+        if cmap:
+            bar_config["VisualPalette"] = {"ColorMap": cmap}
+    else:
+        # Single-series bar: there's no color dimension, so QuickSight would
+        # otherwise paint it with palette slot 1 (now green, since the auto
+        # palette was decoupled from the brand hues). Pin it to brand purple -
+        # the "primary" convention - so single-series time bars read as Kiro
+        # purple rather than whatever happens to lead the categorical palette.
+        bar_config["VisualPalette"] = {"ChartColor": _BRAND_PURPLE}
+    return {
+        "BarChartVisual": {
+            "VisualId": visual_id,
+            "Title": {"Visibility": "VISIBLE", "FormatText": {"PlainText": title}},
+            "ChartConfiguration": bar_config,
+        },
+    }
+
+
+def _bar_time_multi(visual_id: str, title: str, dataset: str, date_col: str,
+                    value_cols: list[tuple[str, str]], arrangement: str = "STACKED",
+                    agg: str = "SUM", legend_title: str | None = None,
+                    series_colors: list[str] | None = None):
+    """Vertical bar over a daily date axis with multiple value series (one
+    measure per (column, label) pair) - e.g. new vs returning users, where the two series are separate columns and
+    STACKED gives the meaningful total (new + returning = daily active).
+    `legend_title` overrides the legend heading: multi-series charts have no
+    color DIMENSION to name the legend, so QuickSight otherwise prints the
+    literal word "Legend" (unlike split-by-column charts that show e.g.
+    "Client Type")."""
+    bar_config = {
+        "BarsArrangement": arrangement,
+        "Orientation": "VERTICAL",
+        "FieldWells": {"BarChartAggregatedFieldWells": {
+            "Category": [{
+                "DateDimensionField": {
+                    "FieldId": f"{visual_id}-d",
+                    "Column": {"DataSetIdentifier": dataset, "ColumnName": date_col},
+                    "DateGranularity": "DAY",
+                },
+            }],
+            "Values": [{
+                "NumericalMeasureField": {
+                    "FieldId": f"{visual_id}-v{i}",
+                    "Column": {"DataSetIdentifier": dataset, "ColumnName": col},
+                    "AggregationFunction": {"SimpleNumericalAggregation": agg},
+                },
+            } for i, (col, _label) in enumerate(value_cols)],
+        }},
+        "SortConfiguration": {
+            "CategorySort": [{
+                "FieldSort": {"FieldId": f"{visual_id}-d", "Direction": "ASC"},
+            }],
+        },
+    }
+    if legend_title is not None:
+        bar_config["Legend"] = {
+            "Visibility": "VISIBLE",
+            "Title": {"Visibility": "VISIBLE", "CustomLabel": legend_title},
+        }
+    if series_colors:
+        # Multi-MEASURE charts have no colour dimension, so a ColorMap can't
+        # target them - the segments are identified by their value FIELD.
+        # DataPathColor pins each measure's colour by field id + display value,
+        # keeping these off palette slot 1 (green) and onto the brand pair.
+        bar_config["VisualPalette"] = {
+            "ColorMap": [
+                {
+                    # FieldValue must be the COLUMN name (what QuickSight uses to
+                    # identify a measure series), NOT the display label - keying
+                    # on the label silently fails to match and the series falls
+                    # back to the auto palette.
+                    "Element": {
+                        "FieldId": f"{visual_id}-v{i}",
+                        "FieldValue": col,
+                    },
+                    "Color": color,
+                }
+                for i, ((col, label), color) in enumerate(zip(value_cols, series_colors))
+            ],
+        }
+    return {
+        "BarChartVisual": {
+            "VisualId": visual_id,
+            "Title": {"Visibility": "VISIBLE", "FormatText": {"PlainText": title}},
+            "ChartConfiguration": bar_config,
+        },
+    }
+
+
+def _table(visual_id: str, title: str, dataset: str,
+           dimensions: list[str], values: list[tuple[str, str]] | None = None,
+           sort_by: tuple[str, str] | None = None):
+    """Table visual. `dimensions` are group-by columns. Each entry is either a
+    plain string (a STRING column → CategoricalDimensionField) or a
+    `(column_name, "date")` tuple (a DATETIME column → DateDimensionField).
+    QuickSight rejects a DATETIME or numeric/boolean column placed in a
+    CategoricalDimensionField, so date columns MUST use the tuple form and
+    non-string non-date columns should go in `values` (or be cast in the view)
+    rather than `dimensions`. `values` is a list of (column_name, agg) for
+    numeric columns - agg is one of SUM / AVERAGE / COUNT / MIN / MAX.
+    `sort_by` is an optional (column_name, direction) pair - direction is
+    "ASC" or "DESC". The sort column may be unaggregated (we use MAX as the
+    SortBy aggregation since QS requires one).
+
+    NOTE: dimension order matters. FieldId is set to `{visual_id}-d{i}` where
+    i is the index in `dimensions`. Visual-level Actions (e.g. click-through
+    setting a parameter to a row's value) reference these FieldIds, so
+    reordering the `dimensions` list silently breaks any Action that points
+    at a positional FieldId. See the p-all-users click-through Action
+    (set_parameters_operation) for an example."""
+    values = values or []
+    # Each value tuple is (col, agg) or (col, agg, fmt). fmt is one of:
+    #   None / omitted - default number display
+    #   "percent"      - field is a 0-1 fraction; render as XX.X% (QS
+    #                    PercentageDisplayFormatConfiguration multiplies by
+    #                    100 automatically)
+    # agg=None marks a pre-aggregated calculated field: QS rejects an
+    # AggregationFunction on aggregate calc fields, so we omit it.
+    def _value_field(visual_id: str, i: int, val: tuple) -> dict:
+        col, agg = val[0], val[1]
+        fmt = val[2] if len(val) > 2 else None
+        field = {
+            "FieldId": f"{visual_id}-v{i}",
+            "Column": {"DataSetIdentifier": dataset, "ColumnName": col},
+        }
+        if agg is not None:
+            field["AggregationFunction"] = {"SimpleNumericalAggregation": agg}
+        if fmt == "percent":
+            field["FormatConfiguration"] = {
+                "FormatConfiguration": {
+                    "PercentageDisplayFormatConfiguration": {
+                        "DecimalPlacesConfiguration": {"DecimalPlaces": 1},
+                    },
+                },
+            }
+        else:
+            field["FormatConfiguration"] = _AUTO_NUMBER_FORMAT
+        return {"NumericalMeasureField": field}
+
+    def _group_field(i: int, dim) -> dict:
+        # dim is either "col" (STRING) or ("col", "date") for a DATETIME column.
+        if isinstance(dim, tuple):
+            col, kind = dim
+        else:
+            col, kind = dim, "string"
+        if kind == "date":
+            return {
+                "DateDimensionField": {
+                    "FieldId": f"{visual_id}-d{i}",
+                    "Column": {"DataSetIdentifier": dataset, "ColumnName": col},
+                    "DateGranularity": "DAY",
+                },
+            }
+        return {
+            "CategoricalDimensionField": {
+                "FieldId": f"{visual_id}-d{i}",
+                "Column": {"DataSetIdentifier": dataset, "ColumnName": col},
+            },
+        }
+
+    config = {
+        "FieldWells": {
+            "TableAggregatedFieldWells": {
+                "GroupBy": [_group_field(i, dim) for i, dim in enumerate(dimensions)],
+                "Values": [_value_field(visual_id, i, val) for i, val in enumerate(values)],
+            },
+        },
+    }
+    if sort_by:
+        col, direction = sort_by
+        # The SortBy aggregation MUST match how the column is displayed,
+        # otherwise the rows order by a different number than the one shown.
+        # e.g. credits_used is displayed as SUM (total per user); sorting it by
+        # MAX (each user's single highest day) makes the table look unsorted.
+        # Look up the column's agg in `values`; default to SUM for a value not
+        # in the list, and MAX only for an unaggregated/calc column (agg=None).
+        sort_agg = "SUM"
+        for v in values:
+            if v[0] == col:
+                sort_agg = v[1] if v[1] is not None else "MAX"
+                break
+        config["SortConfiguration"] = {
+            "RowSort": [{
+                "ColumnSort": {
+                    "SortBy": {"DataSetIdentifier": dataset, "ColumnName": col},
+                    "Direction": direction,
+                    "AggregationFunction": {"NumericalAggregationFunction": {"SimpleNumericalAggregation": sort_agg}},
+                },
+            }],
+        }
+    return {
+        "TableVisual": {
+            "VisualId": visual_id,
+            "Title": {"Visibility": "VISIBLE", "FormatText": {"PlainText": title}},
+            "ChartConfiguration": config,
+        },
+    }
+
+
+def _pivot(visual_id: str, title: str, dataset: str,
+           row_col: str, date_col: str, value_col: str,
+           agg: str = "SUM", row_sort_desc_by_value: bool = True,
+           extra_row_cols: list[str] | None = None):
+    """Pivot table: one ROW per `row_col`, one COLUMN per day of `date_col`,
+    `value_col` aggregated in the cells - i.e. a spreadsheet-style crosstab.
+
+    Use this instead of a flat table when the per-day breakdown should read
+    across rather than down: a flat (user, day) table repeats the user on every
+    date, so 300 users x 30 days is 9,000 rows to scroll, while the pivot is
+    300 rows x 30 columns with the user named once. Row and column totals give
+    the per-user period total and the per-day all-user total for free.
+
+    `extra_row_cols` adds further row fields beside `row_col` - used to carry
+    the Identity Center join key so this grid can be cross-referenced against an
+    external roster. Without it the export identifies users only by
+    `user_label`, a display name that does NOT appear in Kiro's own
+    subscriptions export, leaving nothing to join on. `row_col` stays first so
+    it remains the primary row grouping.
+    """
+    return {
+        "PivotTableVisual": {
+            "VisualId": visual_id,
+            "Title": {"Visibility": "VISIBLE", "FormatText": {"PlainText": title}},
+            "ChartConfiguration": {
+                "FieldWells": {
+                    "PivotTableAggregatedFieldWells": {
+                        "Rows": [{
+                            "CategoricalDimensionField": {
+                                "FieldId": f"{visual_id}-r",
+                                "Column": {"DataSetIdentifier": dataset, "ColumnName": row_col},
+                            },
+                        }] + [{
+                            "CategoricalDimensionField": {
+                                "FieldId": f"{visual_id}-r{i}",
+                                "Column": {"DataSetIdentifier": dataset, "ColumnName": col},
+                            },
+                        } for i, col in enumerate(extra_row_cols or [])],
+                        "Columns": [{
+                            "DateDimensionField": {
+                                "FieldId": f"{visual_id}-c",
+                                "Column": {"DataSetIdentifier": dataset, "ColumnName": date_col},
+                                "DateGranularity": "DAY",
+                            },
+                        }],
+                        "Values": [{
+                            "NumericalMeasureField": {
+                                "FieldId": f"{visual_id}-v",
+                                "Column": {"DataSetIdentifier": dataset, "ColumnName": value_col},
+                                "AggregationFunction": {"SimpleNumericalAggregation": agg},
+                                "FormatConfiguration": _AUTO_NUMBER_FORMAT,
+                            },
+                        }],
+                    },
+                },
+                # Rank rows by their period total (biggest consumers first) and
+                # keep the date columns chronological left-to-right.
+                "SortConfiguration": {
+                    "FieldSortOptions": ([{
+                        "FieldId": f"{visual_id}-r",
+                        "SortBy": {"Column": {
+                            "Direction": "DESC",
+                            "SortBy": {"DataSetIdentifier": dataset, "ColumnName": value_col},
+                            "AggregationFunction": {
+                                "NumericalAggregationFunction": {"SimpleNumericalAggregation": agg},
+                            },
+                        }},
+                    }] if row_sort_desc_by_value else []) + [{
+                        "FieldId": f"{visual_id}-c",
+                        "SortBy": {"Field": {
+                            "FieldId": f"{visual_id}-c",
+                            "Direction": "ASC",
+                        }},
+                    }],
+                },
+                # Row totals = each user's total for the period; column totals =
+                # every user's usage on that day. Both are the numbers an admin
+                # would otherwise compute by hand after exporting.
+                "TotalOptions": {
+                    "RowTotalOptions": {"TotalsVisibility": "VISIBLE",
+                                        "Placement": "END",
+                                        "CustomLabel": "Period total"},
+                    "ColumnTotalOptions": {"TotalsVisibility": "VISIBLE",
+                                           "Placement": "END",
+                                           "CustomLabel": "All users"},
+                },
+                "TableOptions": {
+                    # One metric, so the metric-name header row is noise.
+                    "SingleMetricVisibility": "HIDDEN",
+                    "ToggleButtonsVisibility": "HIDDEN",
+                },
+            },
+        },
+    }
+
+
+def _grid(elements: list[tuple[str, int, int, int, int]]):
+    """Build a GridLayoutConfiguration. Each element is
+    (visual_id, column_index, row_index, column_span, row_span). Grid is 36
+    columns wide by QS convention.
+    """
+    return {
+        "GridLayout": {
+            "Elements": [
+                {
+                    "ElementId": vid,
+                    "ElementType": "VISUAL",
+                    "ColumnIndex": ci,
+                    "ColumnSpan": cs,
+                    "RowIndex": ri,
+                    "RowSpan": rs,
+                }
+                for vid, ci, ri, cs, rs in elements
+            ],
+            "CanvasSizeOptions": {
+                "ScreenCanvasSizeOptions": {"ResizeOption": "FIXED", "OptimizedViewPortWidth": "1600px"},
+            },
+        },
+    }
+
+
+def build_definition(account_id: str, region: str, resource_prefix: str,
+                     identity_mapping: bool = False) -> dict:
+    """Assemble the QuickSight Definition.
+
+    `identity_mapping` mirrors the deploy-time IDENTITY_MAPPING setting. The
+    idc_username / idc_email columns exist on the views and datasets in BOTH
+    modes (a stable schema - changing declared columns between modes would break
+    SPICE ingestion when the flag is toggled), but they are only ever POPULATED
+    when identity mapping is on. So we only place them on the user tables when
+    it is on; otherwise they would render as two permanently empty columns.
+    Authors can still add them from the field list either way.
+    """
+    # Identity join keys shown on the user-facing tables only when they can
+    # actually contain data.
+    idc_dims = ["idc_username", "idc_email"] if identity_mapping else []
+    decls = [
+        {"Identifier": ident,
+         "DataSetArn": dataset_arn(account_id, region, f"{resource_prefix}-{suffix}")}
+        for ident, suffix in DATASET_SUFFIXES.items()
+    ]
+
+    # NOTE: there is no Executive summary sheet. It was dropped because it added
+    # little value - naked KPI totals with no targets/benchmarks to read them
+    # against, and the day-by-day trends it summarized already live on the
+    # Activity & Trends sheet. If a summary page is wanted later, it should lead
+    # with judgment (status vs targets - e.g. a seat-utilization gauge with a
+    # target band, overage-vs-cap, adoption trajectory), not raw totals.
+
+    sheets = [
+        # ----- Activity & Trends ------------------------------------------
+        {
+            "SheetId": "activity",
+            "Name": "Activity & Trends",
+            "ContentType": "INTERACTIVE",
+            "Visuals": [
+                # Top row: two compact line charts for the volume signals.
+                # These three read tier_breakdown (which carries
+                # subscription_tier) so the Tier picker actually filters them.
+                # The `users` column there is per-(date, tier, client) - SUMming
+                # across clients gives daily distinct-by-tier; SUMming across
+                # tiers loses the distinct-user property but matches the
+                # by-client view we want here.
+                # Reads daily_trends (grouped date+client_type), NOT
+                # tier_breakdown: tier_breakdown is grouped date+tier+client, so
+                # summing its per-tier distinct-user counts across the tier
+                # dimension double-counts users active in >1 tier and inflates
+                # DAU. daily_trends.active_users is COUNT(DISTINCT user_id) per
+                # (date, client) - the correct per-client daily active count.
+                # CLUSTERED, not stacked: active_users is a distinct-user count
+                # per (date, client); a user active in >1 client would be
+                # double-counted by a stacked total, so show the clients
+                # side-by-side instead of summing them.
+                _sub(_bar_time_stacked("a-active",      "Daily active users (by client)", "trends", "activity_date", "active_users", stack_col="client_type", arrangement="CLUSTERED"),
+                     "Daily active users (distinct), by client - see if engagement is concentrated in IDE, CLI, or Plugin. Bars are side-by-side (not stacked) because a user active in two clients can't be summed into one total."),
+                _sub(_bar_time_stacked("a-messages",    "Daily messages (by client)",     "tiers", "activity_date", "messages",      stack_col="client_type"),
+                     "Daily message volume by client. The mix shifts as users change which surfaces they prefer."),
+                # Single large stacked area for the headline cost story.
+                _sub(_bar_time_stacked("a-credits",     "Daily credits used (by client)", "tiers", "activity_date", "credits_used", stack_col="client_type"),
+                     "Daily credit consumption stacked by client - the cost story. Which surface drives most spend?"),
+                # Daily active users stacked by tier - replaces the earlier
+                # tier × day heat map, which read poorly across so few tiers.
+                _sub(_bar_time_stacked("a-tier-trend", "Daily active users by tier", "heatmap", "activity_date", "active_users", stack_col="subscription_tier"),
+                     "Daily distinct users by tier (each counted once per day). Power share rising = good adoption."),
+                # New vs returning active users per day - the adoption/onboarding
+                # signal. new_users / returning_users are separate columns on
+                # daily_trends. STACKED bars: the two are mutually exclusive
+                # (a user is new OR returning on a given day), so the stack
+                # total reads as that day's total active users.
+                _sub(_bar_time_multi("a-new-returning", "Daily new vs returning users", "trends",
+                                 "activity_date",
+                                 [("new_users", "New"), ("returning_users", "Returning")],
+                                 legend_title="User type",
+                                 series_colors=[_BRAND_PURPLE, _BRAND_ORANGE]),
+                     "Daily new (first-ever-seen) vs returning active users. A healthy adoption curve shows returning users growing while new users stay steady or rise."),
+                # 100%-stacked bar (STACKED_PERCENT): with 7+ models that grow
+                # over time, an absolute stacked bar is unreadable color-soup
+                # and small segments get crushed. Normalizing each day to 100%
+                # answers the real question - what's the model MIX and how is it
+                # shifting - rather than absolute volume (which the by-client
+                # message/credit charts already cover). Empty days stay empty
+                # (no bar), so no interpolation.
+                _sub(_bar_time_stacked("a-models", "Daily message mix by model", "models", "activity_date", "messages", stack_col="model_name", arrangement="STACKED_PERCENT"),
+                     "Each day's bar is normalized to 100% - segments show each model's SHARE of that day's messages, so you can see the model mix shift over time. New models appear automatically. Responds to both the date range and the Tier picker."),
+            ],
+            # Reading flow: cost -> adoption -> engagement -> model detail.
+            # Credits leads as the hero (it's the cost story admins open this
+            # sheet for); the two "active users" cuts sit side by side as one
+            # adoption group with new-vs-returning demoted to a narrow tile
+            # (it's the weakest signal, especially at low user counts); the
+            # model heat map closes the sheet full-width (most detailed/
+            # exploratory, reads best wide).
+            "Layouts": [{"Configuration": _grid([
+                # Row 1: COST - credits, the hero tile.
+                ("a-credits",     0,  0, 36, 9),
+                # Row 2: ADOPTION - active users by client + by tier, with
+                # new-vs-returning demoted to a narrow tile alongside them.
+                ("a-active",        0,  9, 14, 7),
+                ("a-tier-trend",   14,  9, 14, 7),
+                ("a-new-returning", 28,  9,  8, 7),
+                # Row 3: ENGAGEMENT - daily messages by client.
+                ("a-messages",    0, 16, 36, 7),
+                # Row 4: MODEL DETAIL - messages-by-model heat map, full width.
+                ("a-models",      0, 23, 36, 9),
+            ])}],
+        },
+
+        # ----- People ----------------------------------------------------
+        # Cohort-level analytics: top-N tables, segmentation, funnel,
+        # week-over-week movers. Per-user drilling lives on the separate
+        # User-detail sheet via the DrillUser parameter.
+        {
+            "SheetId": "people",
+            "Name": "People",
+            "ContentType": "INTERACTIVE",
+            "Visuals": [
+                # The all-users table is the workhorse and what admins come
+                # to People for, so it leads the sheet. It's sortable by any
+                # column, which makes separate "top 10 by X" bars redundant -
+                # those were removed.
+                # Group by user_label + user_tier (NOT subscription_tier):
+                # subscription_tier is per-row in base, so a user who changed
+                # tier mid-window (e.g. Pro -> Pro+) would split into two rows.
+                # user_tier is a per-user CONSTANT (the tier from the user's most
+                # recent activity day - max_by over date in the base view, i.e.
+                # their CURRENT plan) - grouping on it adds no extra rows, so
+                # each user is one
+                # row with usage metrics summed across whatever tier(s) they
+                # held in the selected range. A categorical MAX in the visual
+                # layer isn't possible (CategoricalMeasureField only allows
+                # DISTINCT_COUNT/COUNT), hence the data-layer constant column.
+                _sub(_table("p-all-users", "All users",
+                           "base",
+                           # user_label MUST stay first: the click-through
+                           # Action references this table's d0 FieldId to set
+                           # DrillUser (see the set_parameters_operation below).
+                           # The idc_* join keys follow so an admin can export
+                           # this grid and join it to their own roster - included
+                           # only when identity mapping is on (they would be
+                           # empty columns otherwise).
+                           dimensions=["user_label", *idc_dims, "user_tier"],
+                           values=[
+                               ("total_messages",       "SUM"),
+                               ("chat_conversations",   "SUM"),
+                               ("credits_used",         "SUM"),
+                               ("overage_credits_used", "SUM"),
+                               ("active_days_calc",     None),
+                           ],
+                           sort_by=("credits_used", "DESC")),
+                     "Every user (one row per user; usage summed across the period even if their tier changed), sortable by any column. Scoped to the date range selected above. Click any row to open that user on the User detail sheet."),
+                # Per-user daily credits as a CROSSTAB: users down, dates across.
+                # A flat (user, day) table repeats the user on every date - 300
+                # users x 30 days is 9,000 rows to scroll - whereas the pivot is
+                # one row per user with a column per day, which is also the shape
+                # you want when exporting to a spreadsheet. Row totals give each
+                # user's period total; column totals give the all-user daily
+                # spend. Credits is the cell metric (a pivot cell holds one
+                # measure); the All users table above carries the other metrics.
+                # Reads `base` rather than the gap-filled `dense` dataset: base
+                # has rows only for days a user was actually active, so the grid
+                # is not padded with zero columns for idle days.
+                # Carry idc_username alongside user_label (when identity mapping
+                # is on) so an export of THIS grid can be joined to an external
+                # roster. user_label is a display name and is absent from Kiro's
+                # own subscriptions export, so on its own it gives an admin
+                # nothing to match against - the same reason the All-users table
+                # above carries the join keys. Username only, not email too: one
+                # extra row field keeps the crosstab scannable.
+                _sub(_pivot("p-user-daily", "Daily credits used (by user)",
+                            "base", "user_label", "activity_date", "credits_used",
+                            extra_row_cols=(["idc_username"] if identity_mapping else [])),
+                     "Credits used per user per day for the selected date range - users down, dates across. Highest-consuming users first; 'Period total' is each user's total for the range and 'All users' is that day's total. Use the visual's menu (top-right) > Export to CSV to download the grid."),
+                _sub(_pie_count("p-segments", "Engagement segments (selected range)", "base", "segment_calc", "user_id"),
+                     "Active users in the selected date range split by intensity: Power (≥20 active days or ≥1000 messages) / Active (≥8 days) / Light (≥1 day). Recomputes as you change the date range above - pick a month to segment that period's users."),
+                # Engagement funnel rendered as three KPI tiles over the
+                # selected range (the native funnel chart can't be driven by
+                # the date picker - see the funnel_geN_user calc fields). Titles
+                # are just the threshold; the engagement-funnel framing lives in
+                # the captions to avoid repeating "Funnel:" on every tile.
+                _sub(_kpi_distinct_count("p-funnel-1", "≥1 active day", "base", "funnel_ge1_user"),
+                     "Engagement funnel: users active ≥1 day in the selected range. Cumulative - includes everyone in the ≥8 and ≥20 tiles. Recomputes with the date range above."),
+                _sub(_kpi_distinct_count("p-funnel-8", "≥8 active days", "base", "funnel_ge8_user"),
+                     "Engagement funnel: users active ≥8 days in the selected range."),
+                _sub(_kpi_distinct_count("p-funnel-20", "≥20 active days", "base", "funnel_ge20_user"),
+                     "Engagement funnel: users active ≥20 days in the selected range."),
+                _sub(_bar("p-by-model", "Top users (by model)", "models", "user_label", "messages", items_limit=15),
+                     "Per-user message count across all models, scoped to the selected date range and Tier picker."),
+                # NOTE: a cohort-retention visual was intentionally removed. It
+                # needs many months of history to be meaningful and did not read
+                # clearly to users; the retention/drift signal is covered more
+                # legibly here by the engagement-segments "Idle" bucket
+                # (seen-before-but-inactive) and the week-over-week movers
+                # "at-risk" flag. The underlying cohort_retention view/dataset
+                # were removed too (see athena/ and cfn/02-quicksight.yaml).
+                # Single movers table with at_risk flag column - replaces the
+                # earlier separate movers + at-risk tables.
+                _sub(_table("p-movers", "Week-over-week movers (fixed 7d vs 7d)",
+                           "movers",
+                           dimensions=["user_label", "subscription_tier", "at_risk"],
+                           values=[
+                               ("prior_messages",  "SUM"),
+                               ("recent_messages", "SUM"),
+                               ("message_delta",   "SUM"),
+                               ("pct_change",      "AVERAGE", "percent"),
+                           ],
+                           # Sort by abs_delta (biggest movers in either
+                           # direction) without displaying it - it's a sort
+                           # key, not a number the admin needs to read.
+                           sort_by=("abs_delta", "DESC")),
+                     "Users with the largest absolute change in messages (last 7d vs prior 7d). at_risk = Yes when drop > 50%. Window is fixed at trailing 7d vs prior 7d - not affected by the date-range picker. Tier picker filters which users are listed; the 7d/7d window is computed before the filter applies."),
+            ],
+            "Layouts": [{"Configuration": _grid([
+                # All-users table leads (what admins come here for), with the
+                # per-day breakdown of the same data directly beneath it.
+                ("p-all-users",    0,  0, 36, 12),
+                ("p-user-daily",   0, 12, 36, 12),
+                # Engagement: segment mix (donut) on the left; the conversion
+                # funnel as three stacked KPI tiles on the right half.
+                ("p-segments",     0, 24, 18, 10),
+                ("p-funnel-1",    18, 24, 18,  4),
+                ("p-funnel-8",    18, 28, 18,  3),
+                ("p-funnel-20",   18, 31, 18,  3),
+                # Per-model top users, then movers.
+                ("p-by-model",     0, 34, 36, 10),
+                ("p-movers",       0, 44, 36, 12),
+            ])}],
+        },
+
+        # ----- Economics -------------------------------------------------
+        # All Economics visuals read `base` so the date-range picker scopes
+        # them to a window. Ratios (credits/user, credits/message, overage %)
+        # are analysis-level calculated fields evaluated per tier over the
+        # filtered rows - see calculated_fields below.
+        {
+            "SheetId": "economics",
+            "Name": "Economics",
+            "ContentType": "INTERACTIVE",
+            "Visuals": [
+                _sub(_pie_count("e-users-by-tier", "Users by tier", "base", "user_tier", "user_id"),
+                     "Distinct users active in each tier (Pro / Pro+ / Pro Max / Power) within the selected window."),
+                # Stacked: in-plan (calc, no agg) + overage (summed) per tier.
+                _sub({
+                    "BarChartVisual": {
+                        "VisualId": "e-credits-by-tier",
+                        "Title": {"Visibility": "VISIBLE", "FormatText": {"PlainText": "Credit usage by tier (in-plan + overage)"}},
+                        "ChartConfiguration": {
+                            "BarsArrangement": "STACKED",
+                            "Orientation": "VERTICAL",
+                            "FieldWells": {
+                                "BarChartAggregatedFieldWells": {
+                                    # user_tier, like every other Economics
+                                    # visual: this one SUMS credits so it never
+                                    # double-counted, but grouping it on the
+                                    # per-row tier while the donut and table
+                                    # beside it group on the per-user tier would
+                                    # split one user's credits across two bars
+                                    # and make the sheet internally inconsistent.
+                                    "Category": [{
+                                        "CategoricalDimensionField": {
+                                            "FieldId": "e-credits-by-tier-c",
+                                            "Column": {"DataSetIdentifier": "base", "ColumnName": "user_tier"},
+                                        },
+                                    }],
+                                    "Values": [
+                                        {"NumericalMeasureField": {
+                                            "FieldId": "e-credits-by-tier-base",
+                                            "Column": {"DataSetIdentifier": "base", "ColumnName": "base_credits_calc"},
+                                            "FormatConfiguration": _AUTO_NUMBER_FORMAT,
+                                        }},
+                                        {"NumericalMeasureField": {
+                                            "FieldId": "e-credits-by-tier-over",
+                                            "Column": {"DataSetIdentifier": "base", "ColumnName": "overage_credits_used"},
+                                            "AggregationFunction": {"SimpleNumericalAggregation": "SUM"},
+                                            "FormatConfiguration": _AUTO_NUMBER_FORMAT,
+                                        }},
+                                    ],
+                                },
+                            },
+                            "DataLabels": {"Visibility": "VISIBLE"},
+                            # Two measures (in-plan vs overage) - colour them as
+                            # the brand pair instead of palette slots 1/2 (green/
+                            # gold). Overage takes orange (the "watch this" hue).
+                            "VisualPalette": {
+                                "ColorMap": [
+                                    {"Element": {"FieldId": "e-credits-by-tier-base", "FieldValue": "base_credits_calc"}, "Color": _BRAND_PURPLE},
+                                    {"Element": {"FieldId": "e-credits-by-tier-over", "FieldValue": "overage_credits_used"}, "Color": _BRAND_ORANGE},
+                                ],
+                            },
+                        },
+                    },
+                }, "Credits per tier in the selected window, split into in-plan vs overage. A tall overage section = candidates for a tier upgrade."),
+                _sub(_bar_calc("e-credits-per-user",    "Credits per user (by tier)",    "base", "user_tier", "credits_per_user_calc"),
+                     "Credits consumed per active user in the window, by tier. Shows whether each tier's users are using their plan fully."),
+                _sub(_bar_calc("e-credits-per-message", "Credits per message (by tier)", "base", "user_tier", "credits_per_message_calc"),
+                     "Credits per message - proxy for cost-per-interaction. Higher = users picking heavier models or longer chats."),
+                _sub(_table("e-unit-econ-table", "Unit economics by tier",
+                       "base",
+                       dimensions=["user_tier"],
+                       values=[
+                           ("active_users_calc",        None),
+                           ("total_messages",           "SUM"),
+                           ("credits_per_user_calc",    None),
+                           ("credits_per_message_calc", None),
+                           ("overage_pct_calc",         None, "percent"),
+                       ]),
+                     "Tier-level economics for the selected window: active users, messages, credits/user, credits/message, and overage % of total credits."),
+            ],
+            "Layouts": [{"Configuration": _grid([
+                ("e-users-by-tier",        0,  0, 12, 10),
+                ("e-credits-by-tier",     12,  0, 24, 10),
+                ("e-credits-per-user",     0, 10, 18,  8),
+                ("e-credits-per-message", 18, 10, 18,  8),
+                ("e-unit-econ-table",      0, 18, 36,  8),
+            ])}],
+        },
+
+        # ----- User detail (drill) ---------------------------------------
+        # Pick one or more users from the dropdown above; every visual on this
+        # sheet filters to exactly that set via the DrillUser parameter. With
+        # several selected, the KPIs and daily charts are the GROUP's totals and
+        # u-period-users breaks them down per person.
+        {
+            "SheetId": "user-detail",
+            "Name": "User detail",
+            "ContentType": "INTERACTIVE",
+            "Visuals": [
+                # Lifetime profile strip (reads `users`/user_totals, drill-
+                # filtered to the selected user via fg-drill-users). This is
+                # the ONLY visual on the sheet that reads `users`; it gives the
+                # lifetime/identity context the windowed KPIs below lack (who
+                # the user is, tier, first/last active, overage). NOT
+                # date-filtered by design - it is whole-history context, so it
+                # stays populated even when the selected window has no activity
+                # for the user. user_label LEADS so the row identifies the user
+                # (resolves to display-name/email when identity mapping is on,
+                # else the user_id UUID); the remaining dimensions (tier /
+                # first-active / last-active) are descriptive; the values are
+                # lifetime totals (MAX over the single user_totals row).
+                _sub(_table("u-profile", "User profile (lifetime)",
+                           "users",
+                           dimensions=["user_label",
+                                       # Directory join keys so this strip
+                                       # carries a key an admin can match
+                                       # against their own roster, not just a
+                                       # display name. Only present when
+                                       # identity mapping is on - they are
+                                       # always NULL otherwise.
+                                       *idc_dims,
+                                       "subscription_tier",
+                                       ("first_active_date", "date"),
+                                       ("last_active_date", "date")],
+                           values=[
+                               ("active_days",          "MAX"),
+                               ("total_messages",       "MAX"),
+                               ("credits_used",         "MAX"),
+                               ("overage_credits_used", "MAX"),
+                           ]),
+                     "Identity and lifetime context for each selected user (all-time, not affected by the date picker): user (name/email if identity mapping is on, else the user ID), plan tier, first/last active date, and lifetime active days / messages / credits (incl. overage credits, which are non-zero only if the user has exceeded plan capacity). The KPIs, the per-user table and the charts below are scoped to the selected date window."),
+                # KPIs read `base` (per-day fact table) so the date picker
+                # filters them. They show the WINDOW TOTAL (sum/distinct over
+                # the whole selected range) - NOT a sparkline. A KPI with a
+                # date TrendGroup makes its primary value the latest trend
+                # period (the last day), which read as "only the last day's
+                # data" rather than the window total. So these are plain totals
+                # with no trend group; the day-by-day view lives in the daily
+                # charts directly below.
+                _sub(_kpi("u-msgs",   "Messages",      "base", "total_messages", "SUM"),
+                     "Total messages sent by the selected user(s) across the selected date window."),
+                _sub(_kpi("u-credits","Credits",       "base", "credits_used",   "SUM"),
+                     "Total credit consumption of the selected user(s) across the selected window."),
+                # Active days = distinct_count(activity_date) via the
+                # active_days_calc calculated field (pre-aggregated, so no
+                # AggregationFunction). base has one row per (user, day,
+                # client_type), so a plain COUNT would double count a user
+                # active on two clients the same day; the distinct-count calc
+                # field avoids that.
+                _sub(_kpi_calc("u-days", "Active days", "base", "active_days_calc"),
+                     "Distinct days on which any selected user was active across the selected window. With several users selected this is NOT the sum of their active days - see the per-user table below for each person's count."),
+                # Per-user usage for the SELECTED WINDOW. The profile strip above
+                # is lifetime and the KPIs are group totals, so without this the
+                # sheet could not answer "what did each of these people use from
+                # Sep 1 to Oct 9?" - which is what selecting several users is for.
+                # Reads `base`, so fg-date-base and fg-drill-base (both scoped to
+                # every visual on this sheet) apply to it. Columns deliberately
+                # mirror p-all-users on People: same dataset, same aggregation,
+                # so the two tables agree to the cent for any user in both, and
+                # this one is simply that table narrowed to the selection.
+                _sub(_table("u-period-users", "Usage in selected period (by user)",
+                           "base",
+                           dimensions=["user_label", *idc_dims, "user_tier"],
+                           values=[
+                               ("total_messages",       "SUM"),
+                               ("chat_conversations",   "SUM"),
+                               ("credits_used",         "SUM"),
+                               ("overage_credits_used", "SUM"),
+                               ("active_days_calc",     None),
+                           ],
+                           sort_by=("credits_used", "DESC")),
+                     "One row per selected user, summed over the date range above - the per-person breakdown of the Messages / Credits / Active days totals. Not affected by the Model picker (Kiro reports credits per user, not per model). To download: visual menu (top-right) > Export to CSV."),
+                # Read `dense` (user_daily_dense) NOT `base`: the dense view
+                # fills no-activity days with zero rows across the user's active
+                # span, so weekends/gaps render as empty bars instead of being
+                # silently skipped (which made sparse usage look continuous).
+                _sub(_bar_time_stacked("u-daily",   "Daily messages",          "dense", "activity_date", "total_messages"),
+                     "Per-day message volume for the selected user(s), summed when several are selected. Days with no activity show as gaps, not skipped."),
+                _sub(_bar_time_stacked("u-credits-line", "Daily credits used", "dense", "activity_date", "credits_used"),
+                     "Per-day credit consumption for the selected user(s), summed when several are selected. Days with no activity show as gaps, not skipped."),
+                _sub(_pie("u-models", "Model split",               "models", "model_name", "messages"),
+                     "How the selected user(s)' messages are distributed across models."),
+            ],
+            "Layouts": [{"Configuration": _grid([
+                # Lifetime profile strip leads (whole-history context), then
+                # the windowed KPIs, the per-user windowed breakdown, daily
+                # trends, and model split below it. The profile strip is taller
+                # than it was for one user so several selected users fit
+                # without an immediate scroll.
+                ("u-profile",       0,  0, 36, 6),
+                ("u-msgs",          0,  6, 12, 5),
+                ("u-credits",      12,  6, 12, 5),
+                ("u-days",         24,  6, 12, 5),
+                ("u-period-users",  0, 11, 36, 8),
+                ("u-daily",         0, 19, 36, 8),
+                ("u-credits-line",  0, 27, 36, 8),
+                ("u-models",        0, 35, 36, 9),
+            ])}],
+        },
+    ]
+
+    # Dashboard-level parameters. SelectedUser was previously a multi-select
+    # picker on the People sheet, but the User detail sheet covers the
+    # single-user drill case more cleanly via DrillUser; the picker on People
+    # only collapsed top-N visuals into top-1 displays which were redundant.
+    parameter_declarations = [
+        # Date range default = "last 30 days", so the picker-driven headline
+        # KPIs align out of the box with the fixed-30d visuals (Seat
+        # utilization, prior-vs-current 30d). Change -30 to e.g. -90 for a
+        # wider default window; users can always widen via the picker.
+        {
+            "DateTimeParameterDeclaration": {
+                "Name": "DateRangeStart",
+                "DefaultValues": {
+                    "RollingDate": {"Expression": "addDateTime(-30, 'DD', truncDate('DD', now()))"},
+                },
+            },
+        },
+        {
+            "DateTimeParameterDeclaration": {
+                "Name": "DateRangeEnd",
+                "DefaultValues": {
+                    "RollingDate": {"Expression": "now()"},
+                },
+            },
+        },
+        # Model picker on People. MULTI_VALUED so the dropdown's "Select All"
+        # option = every model. Default populates from the live model_usage
+        # dataset so all models are selected on first load.
+        {
+            "StringParameterDeclaration": {
+                "ParameterValueType": "MULTI_VALUED",
+                "Name": "SelectedModel",
+                "DefaultValues": {
+                    "DynamicValue": {
+                        "DefaultValueColumn": {
+                            "DataSetIdentifier": "models",
+                            "ColumnName": "model_name",
+                        },
+                        "UserNameColumn": {
+                            "DataSetIdentifier": "models",
+                            "ColumnName": "model_name",
+                        },
+                    },
+                },
+            },
+        },
+        # User picker on the User detail sheet. MULTI_VALUED so an admin can
+        # select a LIST of people (e.g. one team, for a chargeback) and read
+        # their usage together; it was SINGLE_VALUED, which made "usage for
+        # these 12 employees" twelve separate round trips. Same parameter shape
+        # as SelectedModel / SelectedTier, so it behaves the same way: the
+        # dropdown's "Select all" means everyone, and the People click-through
+        # still sets exactly the one clicked user.
+        #
+        # No calculated field may reference ${DrillUser} as a scalar - a
+        # multi-valued parameter has no single value to compare against. It is
+        # consumed only by the EQUALS CategoryFilters in fg-drill-*, which do
+        # support a value list (tests/test_dashboard_definition.py pins this).
+        {
+            "StringParameterDeclaration": {
+                "ParameterValueType": "MULTI_VALUED",
+                "Name": "DrillUser",
+                "DefaultValues": {
+                    "DynamicValue": {
+                        "DefaultValueColumn": {
+                            "DataSetIdentifier": "users",
+                            "ColumnName": "user_label",
+                        },
+                        "UserNameColumn": {
+                            "DataSetIdentifier": "users",
+                            "ColumnName": "user_label",
+                        },
+                    },
+                },
+            },
+        },
+        # Tier picker - drives Activity, People, and Economics. Default
+        # populates from the live tiers dataset so all tiers are selected.
+        {
+            "StringParameterDeclaration": {
+                "ParameterValueType": "MULTI_VALUED",
+                "Name": "SelectedTier",
+                "DefaultValues": {
+                    "DynamicValue": {
+                        "DefaultValueColumn": {
+                            "DataSetIdentifier": "tiers",
+                            "ColumnName": "subscription_tier",
+                        },
+                        "UserNameColumn": {
+                            "DataSetIdentifier": "tiers",
+                            "ColumnName": "subscription_tier",
+                        },
+                    },
+                },
+            },
+        },
+    ]
+
+    # Tab order shown in the dashboard = order of this list. The sheet blocks
+    # above are authored in a convenient order; reorder them here into the
+    # intended narrative without moving the (large) literals around:
+    #   Activity & Trends -> Economics -> People -> User detail
+    # This keeps the two user-centric sheets (People and the User detail it
+    # drills into) adjacent, with the aggregate/trend sheets (Activity,
+    # Economics) grouped before them. (The Executive sheet was removed - see
+    # the note above where the sheets list is built.)
+    _SHEET_ORDER = ["activity", "economics", "people", "user-detail"]
+    sheets.sort(key=lambda s: _SHEET_ORDER.index(s["SheetId"]))
+
+    people_sheet = next(s for s in sheets if s["SheetId"] == "people")
+    # The People sheet's per-sheet controls (Model + Tier) are added later
+    # alongside the other sheets' picker controls so they all share helper
+    # builders (_model_control, _tier_control).
+    people_sheet["ParameterControls"] = []
+
+    # Date-range controls - duplicated on Executive and Activity, each with
+    # a unique ParameterControlId. They drive the same DateRange parameters
+    # so the picker on either sheet filters both.
+    def _date_controls(suffix: str) -> list[dict]:
+        return [
+            {"DateTimePicker": {
+                "ParameterControlId": f"date-start-{suffix}",
+                "Title": "From",
+                "SourceParameterName": "DateRangeStart",
+                "DisplayOptions": {
+                    "DateTimeFormat": "YYYY-MM-DD",
+                    "TitleOptions": {"Visibility": "VISIBLE"},
+                },
+            }},
+            {"DateTimePicker": {
+                "ParameterControlId": f"date-end-{suffix}",
+                "Title": "To",
+                "SourceParameterName": "DateRangeEnd",
+                "DisplayOptions": {
+                    "DateTimeFormat": "YYYY-MM-DD",
+                    "TitleOptions": {"Visibility": "VISIBLE"},
+                },
+            }},
+        ]
+
+    def _tier_control(suffix: str) -> dict:
+        return {
+            "Dropdown": {
+                "ParameterControlId": f"tier-picker-{suffix}",
+                "Title": "Tier",
+                "SourceParameterName": "SelectedTier",
+                "DisplayOptions": {"SelectAllOptions": {"Visibility": "VISIBLE"}},
+                "Type": "MULTI_SELECT",
+                "SelectableValues": {
+                    "LinkToDataSetColumn": {
+                        "DataSetIdentifier": "tiers",
+                        "ColumnName": "subscription_tier",
+                    },
+                },
+            },
+        }
+
+    def _model_control(suffix: str) -> dict:
+        return {
+            "Dropdown": {
+                "ParameterControlId": f"model-picker-{suffix}",
+                "Title": "Model",
+                "SourceParameterName": "SelectedModel",
+                "DisplayOptions": {"SelectAllOptions": {"Visibility": "VISIBLE"}},
+                "Type": "MULTI_SELECT",
+                "SelectableValues": {
+                    "LinkToDataSetColumn": {
+                        "DataSetIdentifier": "models",
+                        "ColumnName": "model_name",
+                    },
+                },
+            },
+        }
+
+    activity_sheet = next(s for s in sheets if s["SheetId"] == "activity")
+    activity_sheet["ParameterControls"] = _date_controls("activity") + [_tier_control("activity"), _model_control("activity")]
+    # People sheet gets the date-range picker (so per-user metrics can be
+    # scoped to a month/period - usage resets monthly, so lifetime sums blur
+    # periods together) plus the Tier picker. The date+tier controls drive the
+    # base-backed visuals (All Users table, segments donut, the three funnel
+    # tiles) and the models-backed Top-users-by-model bar - see
+    # people_base_visuals and the fg-date/tier-people-base groups below. Only
+    # one People visual is intentionally NOT date-filtered: week-over-week
+    # movers (fixed trailing 7d-vs-7d) - labeled as a fixed-window visual. The
+    # Model picker is
+    # intentionally omitted - it was misleading on People (only p-by-model reads
+    # `models`, so it appeared global but affected one visual); slice by model
+    # on Activity (a-models) or User-detail (u-models) instead.
+    people_sheet["ParameterControls"].extend(
+        _date_controls("people") + [_tier_control("people")]
+    )
+    economics_sheet = next(s for s in sheets if s["SheetId"] == "economics")
+    economics_sheet["ParameterControls"] = _date_controls("economics") + [_tier_control("economics")]
+
+    # Click-through Action on the All users table: clicking a row sets
+    # DrillUser to that row's user_label and navigates to the User-detail
+    # sheet. Saves the customer from manually copy-pasting a user_label out
+    # of People and into User-detail's dropdown.
+    p_all_users = next(
+        v for v in people_sheet["Visuals"]
+        if v.get("TableVisual", {}).get("VisualId") == "p-all-users"
+    )
+    p_all_users["TableVisual"]["Actions"] = [{
+        "CustomActionId": "p-all-users-drill",
+        "Name": "Open in User detail",
+        "Status": "ENABLED",
+        "Trigger": "DATA_POINT_CLICK",
+        "ActionOperations": [
+            # QuickSight requires NavigationOperation to come before
+            # SetParametersOperation in the action chain.
+            {
+                "NavigationOperation": {
+                    "LocalNavigationConfiguration": {"TargetSheetId": "user-detail"},
+                },
+            },
+            {
+                "SetParametersOperation": {
+                    "ParameterValueConfigurations": [{
+                        "DestinationParameterName": "DrillUser",
+                        "Value": {
+                            "SourceField": "p-all-users-d0",  # user_label dimension
+                        },
+                    }],
+                },
+            },
+        ],
+    }]
+
+    user_detail_sheet = next(s for s in sheets if s["SheetId"] == "user-detail")
+    # User-detail KPIs read `base` so the date picker actually filters them
+    # (Messages / Credits / Active days in the selected window). Prior
+    # iteration kept lifetime KPIs from `users` and dropped the date picker
+    # to avoid a UX trap; the `base` formulation is the cleaner finish.
+    user_detail_sheet["ParameterControls"] = [
+        {
+            "Dropdown": {
+                "ParameterControlId": "drill-user-picker",
+                "Title": "Users",
+                "SourceParameterName": "DrillUser",
+                # MULTI_SELECT to match the MULTI_VALUED DrillUser. "Select all"
+                # is visible so clearing a selection is one click (it is also
+                # how to deselect everyone before picking a short list).
+                "DisplayOptions": {"SelectAllOptions": {"Visibility": "VISIBLE"}},
+                "Type": "MULTI_SELECT",
+                "SelectableValues": {
+                    "LinkToDataSetColumn": {
+                        "DataSetIdentifier": "users",
+                        "ColumnName": "user_label",
+                    },
+                },
+            },
+        },
+        _model_control("user-detail"),
+    ] + _date_controls("user-detail")
+
+    # FilterGroups: each entry below filters its target visuals by a
+    # parameter (SelectedTier, SelectedModel, DateRangeStart/End, DrillUser).
+    filter_groups = []
+
+    # Drill filter on the User-detail sheet. Filters the datasets that page
+    # reads from to the user(s) picked in the dropdown. EQUALS against a
+    # MULTI_VALUED parameter matches ANY of the selected values - the same
+    # mechanism the Tier and Model pickers rely on. `dense` is the gap-filled
+    # per-user daily series behind the daily Messages/Credits bars.
+    for dataset_id in ("users", "base", "models", "dense"):
+        filter_groups.append({
+            "FilterGroupId": f"fg-drill-{dataset_id}",
+            "Filters": [{
+                "CategoryFilter": {
+                    "FilterId": f"f-drill-{dataset_id}",
+                    "Column": {"DataSetIdentifier": dataset_id, "ColumnName": "user_label"},
+                    "Configuration": {
+                        "CustomFilterConfiguration": {
+                            "MatchOperator": "EQUALS",
+                            "NullOption": "NON_NULLS_ONLY",
+                            "ParameterName": "DrillUser",
+                        },
+                    },
+                },
+            }],
+            "ScopeConfiguration": {
+                "SelectedSheets": {
+                    "SheetVisualScopingConfigurations": [{
+                        "SheetId": "user-detail",
+                        "Scope": "ALL_VISUALS",
+                    }],
+                },
+            },
+            "CrossDataset": "SINGLE_DATASET",
+            "Status": "ENABLED",
+        })
+
+    # Tier filter - datasets that carry subscription_tier, scoped to the
+    # sheets where those datasets are visualized. Executive doesn't get a
+    # tier filter because its KPIs come from `trends` (no tier column) and
+    # the sheet is meant as a 30-second status summary.
+    tier_filtered_datasets = [
+        # base now backs the Economics sheet (all 5 visuals) in addition to
+        # being read elsewhere; scope its tier filter to economics.
+        ("base",       ["economics"]),
+        ("heatmap",    ["activity"]),
+        ("users",      ["people"]),
+        ("movers",     ["people"]),
+        # The segments donut and funnel tiles moved to `base` (date-range
+        # driven), so their tier filtering is handled by fg-tier-people-base
+        # instead - `engagement` and `funnel` are no longer tier-filtered here.
+        # (The `engagement` dataset is currently unreferenced by any visual
+        # since the Executive sheet was removed; it's kept registered for a
+        # possible future exec/adoption page and is harmless.)
+        # tiers (tier_breakdown view) is read on Activity for the daily
+        # by-client lines/area.
+        ("tiers",      ["activity"]),
+        # models (model_usage) now carries subscription_tier, so the Tier
+        # picker filters the model visuals too (a-models on Activity,
+        # p-by-model on People, u-models on User detail). CrossDataset is
+        # SINGLE_DATASET so this only touches models-backed visuals on those
+        # sheets, not their other visuals.
+        ("models",     ["activity", "people", "user-detail"]),
+    ]
+    for dataset_id, sheet_ids in tier_filtered_datasets:
+        # Filter the SAME column the visuals group by. `base` exposes both a
+        # per-row subscription_tier and a per-user-constant user_tier, and every
+        # base-backed visual groups by user_tier, so filtering base on the
+        # per-row column would let a mid-window tier changer appear under a tier
+        # the picker did not select. The other datasets have only
+        # subscription_tier (already one value per row at their grain).
+        tier_col = "user_tier" if dataset_id == "base" else "subscription_tier"
+        filter_groups.append({
+            "FilterGroupId": f"fg-tier-{dataset_id}",
+            "Filters": [{
+                "CategoryFilter": {
+                    "FilterId": f"f-tier-{dataset_id}",
+                    "Column": {"DataSetIdentifier": dataset_id, "ColumnName": tier_col},
+                    "Configuration": {
+                        "CustomFilterConfiguration": {
+                            "MatchOperator": "EQUALS",
+                            "NullOption": "NON_NULLS_ONLY",
+                            "ParameterName": "SelectedTier",
+                        },
+                    },
+                },
+            }],
+            "ScopeConfiguration": {
+                "SelectedSheets": {
+                    "SheetVisualScopingConfigurations": [
+                        {"SheetId": s, "Scope": "ALL_VISUALS"} for s in sheet_ids
+                    ],
+                },
+            },
+            "CrossDataset": "SINGLE_DATASET",
+            "Status": "ENABLED",
+        })
+
+    # Date-range filter, scoped per dataset to the sheets where that dataset
+    # is visualized. On People, only the All Users table (p-all-users, which
+    # reads `base`) is date-scoped - it's added as a dedicated SELECTED_VISUALS
+    # group below. The other People visuals (segments / funnel / movers) keep
+    # their own trailing-window logic and are NOT date-filtered.
+    date_filtered_datasets = [
+        ("trends",  "activity_date", ["activity"]),
+        # base feeds the Activity-sheet visuals, User-detail (KPIs + daily
+        # lines), and the Economics sheet (all Economics visuals read base).
+        ("base",    "activity_date", ["activity", "user-detail", "economics"]),
+        # dense = gap-filled per-user daily series; only the User-detail daily
+        # Messages/Credits bars read it, so the date picker scopes it there.
+        ("dense",   "activity_date", ["user-detail"]),
+        # models feeds Activity (a-models) and User-detail (u-models).
+        # People is included so the "Top users (by model)" bar honors the
+        # People date picker. People's only `models`-backed visual is
+        # p-by-model, so ALL_VISUALS on the People sheet scopes to just it.
+        ("models",  "activity_date", ["activity", "user-detail", "people"]),
+        ("heatmap", "activity_date", ["activity"]),
+        # tier_breakdown carries activity_date and is read by Activity-sheet
+        # visuals (a-active / a-messages / a-credits).
+        ("tiers",   "activity_date", ["activity"]),
+    ]
+    for dataset_id, column, sheet_ids in date_filtered_datasets:
+        filter_groups.append({
+            "FilterGroupId": f"fg-date-{dataset_id}",
+            "Filters": [{
+                "TimeRangeFilter": {
+                    "FilterId": f"f-date-{dataset_id}",
+                    "Column": {"DataSetIdentifier": dataset_id, "ColumnName": column},
+                    "IncludeMinimum": True,
+                    "IncludeMaximum": True,
+                    "RangeMinimumValue": {"Parameter": "DateRangeStart"},
+                    "RangeMaximumValue": {"Parameter": "DateRangeEnd"},
+                    "NullOption": "NON_NULLS_ONLY",
+                    "TimeGranularity": "DAY",
+                },
+            }],
+            "ScopeConfiguration": {
+                "SelectedSheets": {
+                    "SheetVisualScopingConfigurations": [
+                        {"SheetId": s, "Scope": "ALL_VISUALS"}
+                        for s in sheet_ids
+                    ],
+                },
+            },
+            "CrossDataset": "SINGLE_DATASET",
+            "Status": "ENABLED",
+        })
+
+    # People base-backed visuals: date-scope the visuals that read `base` (the
+    # All Users table and the engagement-segments donut), leaving the remaining
+    # trailing-window visuals untouched. Separate group with a SELECTED_VISUALS
+    # scope so the People date picker drives these without affecting the movers
+    # table.
+    # This list drives BOTH the date-range and Tier filter groups for the
+    # People sheet's base-backed visuals - a visual omitted here silently
+    # ignores the From/To picker.
+    people_base_visuals = ["p-all-users", "p-user-daily", "p-segments",
+                           "p-funnel-1", "p-funnel-8", "p-funnel-20"]
+    filter_groups.append({
+        "FilterGroupId": "fg-date-people-base",
+        "Filters": [{
+            "TimeRangeFilter": {
+                "FilterId": "f-date-people-base",
+                "Column": {"DataSetIdentifier": "base", "ColumnName": "activity_date"},
+                "IncludeMinimum": True,
+                "IncludeMaximum": True,
+                "RangeMinimumValue": {"Parameter": "DateRangeStart"},
+                "RangeMaximumValue": {"Parameter": "DateRangeEnd"},
+                "NullOption": "NON_NULLS_ONLY",
+                "TimeGranularity": "DAY",
+            },
+        }],
+        "ScopeConfiguration": {
+            "SelectedSheets": {
+                "SheetVisualScopingConfigurations": [{
+                    "SheetId": "people",
+                    "Scope": "SELECTED_VISUALS",
+                    "VisualIds": people_base_visuals,
+                }],
+            },
+        },
+        "CrossDataset": "SINGLE_DATASET",
+        "Status": "ENABLED",
+    })
+
+    # Same base-backed People visuals also honor the Tier picker. The tier
+    # filter group for `base` (above) is scoped to economics only; add these
+    # explicitly so the Tier control works against the base-backed table/donut.
+    #
+    # Filter on user_tier, NOT subscription_tier: the All-users table GROUPS by
+    # user_tier (the per-user constant), so filtering on the per-row column made
+    # the two disagree for anyone who changed tier mid-window. Selecting
+    # Tier = Pro returned 8 rows whose tier column read "Pro+" - a user keeps
+    # any row whose per-row tier matched, but the row is then labelled with
+    # their current tier. Filtering and displaying the same column makes the
+    # grid self-consistent: pick Pro, get exactly the users whose current tier
+    # is Pro, with their whole windowed usage.
+    filter_groups.append({
+        "FilterGroupId": "fg-tier-people-base",
+        "Filters": [{
+            "CategoryFilter": {
+                "FilterId": "f-tier-people-base",
+                "Column": {"DataSetIdentifier": "base", "ColumnName": "user_tier"},
+                "Configuration": {
+                    "CustomFilterConfiguration": {
+                        "MatchOperator": "EQUALS",
+                        "NullOption": "NON_NULLS_ONLY",
+                        "ParameterName": "SelectedTier",
+                    },
+                },
+            },
+        }],
+        "ScopeConfiguration": {
+            "SelectedSheets": {
+                "SheetVisualScopingConfigurations": [{
+                    "SheetId": "people",
+                    "Scope": "SELECTED_VISUALS",
+                    "VisualIds": people_base_visuals,
+                }],
+            },
+        },
+        "CrossDataset": "SINGLE_DATASET",
+        "Status": "ENABLED",
+    })
+
+    # Model picker filter: applied to every visual that reads the `models`
+    # dataset across Activity, People, and User-detail. QuickSight requires
+    # filter groups scoped to multiple sheets to use ALL_VISUALS on each
+    # sheet, so for SELECTED_VISUALS scopes we emit one filter group per
+    # sheet.
+    # Scope the model filter ONLY to the visuals on sheets that actually have a
+    # Model picker: a-models (Activity) and u-models (User detail). People's
+    # p-by-model is deliberately NOT included - so SelectedModel, set on
+    # Activity or User detail, does NOT carry over and silently filter
+    # p-by-model when the user navigates to People (People has no Model control
+    # to reveal or reset such a filter). p-by-model therefore always shows all
+    # models, scoped only by the People date + tier pickers. (People used to
+    # have a Model picker; it was removed because it filtered only 1 of the
+    # sheet's visuals and read as global.)
+    model_filter_visuals = {
+        "activity":    ["a-models"],
+        "user-detail": ["u-models"],
+    }
+    for sheet_id, visual_ids in model_filter_visuals.items():
+        filter_groups.append({
+            "FilterGroupId": f"fg-model-{sheet_id}",
+            "Filters": [{
+                "CategoryFilter": {
+                    "FilterId": f"f-model-{sheet_id}",
+                    "Column": {"DataSetIdentifier": "models", "ColumnName": "model_name"},
+                    "Configuration": {
+                        "CustomFilterConfiguration": {
+                            "MatchOperator": "EQUALS",
+                            "NullOption": "NON_NULLS_ONLY",
+                            "ParameterName": "SelectedModel",
+                        },
+                    },
+                },
+            }],
+            "ScopeConfiguration": {
+                "SelectedSheets": {
+                    "SheetVisualScopingConfigurations": [{
+                        "SheetId": sheet_id,
+                        "Scope": "SELECTED_VISUALS",
+                        "VisualIds": visual_ids,
+                    }],
+                },
+            },
+            "CrossDataset": "SINGLE_DATASET",
+            "Status": "ENABLED",
+        })
+
+    # (No explicit "exclude Idle" filter on the segments donut any more: it now
+    # reads `base` over the selected date range, where every visible user has
+    # >=1 active day in range, so the Idle bucket can't appear. The old filter
+    # targeted the fixed-window engagement view, which the donut no longer uses.
+    # Filtering on the level-aware segment_calc field is also unsafe, so it is
+    # intentionally omitted.)
+
+    # Analysis-level calculated fields. These let the Economics sheet and the
+    # User-detail "Active days" KPI compute correct aggregates over `base`
+    # *after* the date-range filter is applied - something a pre-aggregated
+    # Athena view (e.g. user_totals) can't do because its numbers are frozen
+    # at full-history totals. This is why the Economics sheet was moved off a
+    # dedicated unit-economics view and onto `base` + these calc fields.
+    #
+    # Ratio fields use aggregate functions directly (sum/distinctCount) so
+    # QuickSight evaluates them at the visual's grouping level (e.g. per
+    # tier) over the filtered rows, giving a true windowed ratio rather than
+    # an average-of-daily-ratios.
+    calculated_fields = [
+        # User-detail: true active-day count. base has one row per
+        # (user, day, client_type); a user active on IDE+CLI the same day
+        # is two rows, so a plain COUNT over-reports days. distinct_count of
+        # the date is correct.
+        {
+            "DataSetIdentifier": "base",
+            "Name": "active_days_calc",
+            "Expression": "distinct_count({activity_date})",
+        },
+        # --- People "engagement segments" donut, computed over the selected
+        # date range (not a fixed trailing 30d). The donut groups by
+        # `segment_calc` and counts distinct users per bucket. Because these
+        # are PRE_AGG level-aware aggregations partitioned by user_id, each
+        # user's active-days / messages are evaluated over exactly the rows the
+        # People date+tier picker leaves visible, so the segment recomputes as
+        # the range changes. "Idle" cannot occur within a window (every visible
+        # user has >=1 active day in range), so the bucket naturally drops out
+        # and no explicit exclude filter is needed.
+        {
+            "DataSetIdentifier": "base",
+            "Name": "user_active_days_in_range",
+            "Expression": "distinctCountOver({activity_date}, [{user_id}], PRE_AGG)",
+        },
+        {
+            "DataSetIdentifier": "base",
+            "Name": "user_messages_in_range",
+            "Expression": "sumOver({total_messages}, [{user_id}], PRE_AGG)",
+        },
+        {
+            "DataSetIdentifier": "base",
+            "Name": "segment_calc",
+            "Expression": (
+                "ifelse("
+                "{user_active_days_in_range} >= 20 OR {user_messages_in_range} >= 1000, 'Power',"
+                "{user_active_days_in_range} >= 8, 'Active',"
+                "{user_active_days_in_range} >= 1, 'Light',"
+                "'Idle')"
+            ),
+        },
+        # --- People engagement funnel, computed over the selected date range.
+        # The native funnel chart needs one pre-pivoted row per stage, which we
+        # can't produce from daily-grain `base` in a single visual; instead the
+        # funnel is rendered as three KPI tiles (>=1 / >=8 / >=20 active days),
+        # each a DISTINCT_COUNT of the users meeting that threshold IN RANGE.
+        # Each field returns the user_id when the user qualifies, else NULL, so
+        # distinct_count tallies only qualifying users. Cumulative by
+        # construction: every >=20 user is also >=8 and >=1, so the three
+        # counts read as a descending conversion narrative. Reuses
+        # user_active_days_in_range (PRE_AGG over user_id), so the tiles
+        # recompute as the People date/tier picker changes.
+        {
+            "DataSetIdentifier": "base",
+            "Name": "funnel_ge1_user",
+            "Expression": "ifelse({user_active_days_in_range} >= 1, {user_id}, NULL)",
+        },
+        {
+            "DataSetIdentifier": "base",
+            "Name": "funnel_ge8_user",
+            "Expression": "ifelse({user_active_days_in_range} >= 8, {user_id}, NULL)",
+        },
+        {
+            "DataSetIdentifier": "base",
+            "Name": "funnel_ge20_user",
+            "Expression": "ifelse({user_active_days_in_range} >= 20, {user_id}, NULL)",
+        },
+        # Distinct active users in the window, as a numeric calc field so it
+        # can sit in a table value well (a raw STRING user_id can't take
+        # DISTINCT_COUNT in a NumericalMeasureField).
+        {
+            "DataSetIdentifier": "base",
+            "Name": "active_users_calc",
+            "Expression": "distinct_count({user_id})",
+        },
+        # Economics ratios over the filtered window, evaluated per tier.
+        # Denominators are guarded with ifelse(<d>=0, NULL, <d>): a tier/window
+        # can legitimately have a zero denominator (e.g. credit-only rows with
+        # zero messages, or a window where a tier has no users), and an
+        # unguarded /0 renders as a broken/blank bar with no explanation.
+        # Returning NULL makes the cell explicitly empty instead.
+        {
+            "DataSetIdentifier": "base",
+            "Name": "credits_per_user_calc",
+            "Expression": "sum({credits_used}) / ifelse(distinct_count({user_id}) = 0, NULL, distinct_count({user_id}))",
+        },
+        {
+            "DataSetIdentifier": "base",
+            "Name": "credits_per_message_calc",
+            "Expression": "sum({credits_used}) / ifelse(sum({total_messages}) = 0, NULL, sum({total_messages}))",
+        },
+        {
+            "DataSetIdentifier": "base",
+            "Name": "overage_pct_calc",
+            "Expression": "sum({overage_credits_used}) / ifelse(sum({credits_used}) = 0, NULL, sum({credits_used}))",
+        },
+        # In-plan (non-overage) credits, for the stacked credits-by-tier bar.
+        # overage_credits_used <= credits_used by construction, so the
+        # difference is non-negative without a guard (QS calc fields don't
+        # support Athena's greatest()).
+        {
+            "DataSetIdentifier": "base",
+            "Name": "base_credits_calc",
+            "Expression": "sum({credits_used}) - sum({overage_credits_used})",
+        },
+    ]
+
+    return {
+        "DataSetIdentifierDeclarations": decls,
+        "Sheets": sheets,
+        "ParameterDeclarations": parameter_declarations,
+        "FilterGroups": filter_groups,
+        "CalculatedFields": calculated_fields,
+    }
+
+
+def upsert(qs, *, account_id: str, principal_arn: str, theme_arn: str | None,
+           asset_id: str, is_dashboard: bool, definition: dict,
+           version: str | None = None, name: str = DEFAULT_NAME) -> str:
+    create_kwargs = {
+        "AwsAccountId": account_id,
+        "Name": name,
+        "Definition": definition,
+        "Permissions": [{
+            "Principal": principal_arn,
+            "Actions": (
+                [
+                    "quicksight:DescribeDashboard",
+                    "quicksight:ListDashboardVersions",
+                    "quicksight:UpdateDashboardPermissions",
+                    "quicksight:QueryDashboard",
+                    "quicksight:UpdateDashboard",
+                    "quicksight:DeleteDashboard",
+                    "quicksight:DescribeDashboardPermissions",
+                    "quicksight:UpdateDashboardPublishedVersion",
+                ] if is_dashboard else [
+                    "quicksight:RestoreAnalysis",
+                    "quicksight:UpdateAnalysisPermissions",
+                    "quicksight:DeleteAnalysis",
+                    "quicksight:DescribeAnalysisPermissions",
+                    "quicksight:QueryAnalysis",
+                    "quicksight:DescribeAnalysis",
+                    "quicksight:UpdateAnalysis",
+                ]
+            ),
+        }],
+    }
+
+    if is_dashboard:
+        create_kwargs["DashboardId"] = asset_id
+        create_fn = qs.create_dashboard
+        update_fn = qs.update_dashboard
+        update_kwargs = {
+            "AwsAccountId": account_id,
+            "DashboardId": asset_id,
+            "Name": name,
+            "Definition": definition,
+        }
+    else:
+        create_kwargs["AnalysisId"] = asset_id
+        create_fn = qs.create_analysis
+        update_fn = qs.update_analysis
+        update_kwargs = {
+            "AwsAccountId": account_id,
+            "AnalysisId": asset_id,
+            "Name": name,
+            "Definition": definition,
+        }
+
+    if theme_arn:
+        create_kwargs["ThemeArn"] = theme_arn
+        update_kwargs["ThemeArn"] = theme_arn
+
+    # Stamp the sample's version onto the dashboard version itself, so the
+    # QuickSight console's version history answers "which code produced this?"
+    # without needing CloudFormation access - the reader looking at a suspect
+    # number usually does not have it.
+    #
+    # VersionDescription exists on Create/UpdateDashboard but NOT on the Analysis
+    # operations (verified against the botocore service model), so it is set only
+    # on the dashboard path; passing it to create_analysis would raise
+    # ParamValidationError. The API caps it at 512 chars.
+    if version and is_dashboard:
+        description = f"kiro-user-analytics {version}"[:512]
+        create_kwargs["VersionDescription"] = description
+        update_kwargs["VersionDescription"] = description
+
+    try:
+        resp = create_fn(**create_kwargs)
+        action = "created"
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceExistsException":
+            raise
+        resp = update_fn(**update_kwargs)
+        action = "updated"
+
+    # Wait for the build to finish and assert success on BOTH paths. Without
+    # this, a malformed Definition produces a CREATION_FAILED version
+    # while the script returns 0, which is hard to detect in CI.
+    _wait_and_assert(qs, account_id, asset_id, resp, is_dashboard)
+
+    # update_dashboard creates a new version but does NOT publish it.
+    # Promote so the UI shows the latest. (create_dashboard auto-publishes
+    # v1 - only update needs explicit promotion.)
+    if is_dashboard and action == "updated":
+        version = resp.get("VersionArn", "").rsplit("/", 1)[-1]
+        if version.isdigit():
+            qs.update_dashboard_published_version(
+                AwsAccountId=account_id,
+                DashboardId=asset_id,
+                VersionNumber=int(version),
+            )
+            print(f"  Dashboard  published: v{version}", file=sys.stderr)
+
+    print(f"  {('Dashboard' if is_dashboard else 'Analysis'):9s} {action}: {resp.get('Arn', asset_id)}",
+          file=sys.stderr)
+    return asset_id
+
+
+def _wait_and_assert(qs, account_id: str, asset_id: str, resp: dict, is_dashboard: bool):
+    """Poll the asset until it reaches a terminal state. Raise SystemExit
+    with the QS-reported errors if it failed."""
+    version_arn = resp.get("VersionArn", "")
+    version = version_arn.rsplit("/", 1)[-1] if version_arn else ""
+
+    label = "Dashboard" if is_dashboard else "Analysis"
+    terminal_ok   = {"CREATION_SUCCESSFUL", "UPDATE_SUCCESSFUL"}
+    terminal_bad  = {"CREATION_FAILED", "UPDATE_FAILED"}
+
+    for _ in range(120):
+        if is_dashboard:
+            kwargs = {"AwsAccountId": account_id, "DashboardId": asset_id}
+            if version.isdigit():
+                kwargs["VersionNumber"] = int(version)
+            desc = qs.describe_dashboard(**kwargs)["Dashboard"]["Version"]
+        else:
+            desc = qs.describe_analysis(
+                AwsAccountId=account_id, AnalysisId=asset_id,
+            )["Analysis"]
+        status = desc["Status"]
+        if status in terminal_ok | terminal_bad:
+            break
+        time.sleep(2)
+    else:
+        raise SystemExit(f"{label} {asset_id} did not reach terminal state in 240s")
+
+    if status in terminal_bad:
+        errors = desc.get("Errors", [])
+        msg = f"{label} {asset_id} ended in {status}"
+        if errors:
+            msg += f"\n  Errors: {errors}"
+        raise SystemExit(msg)
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--account-id", required=True)
+    p.add_argument("--region", required=True)
+    p.add_argument("--principal-arn", required=True)
+    p.add_argument("--theme-arn", default=None,
+                   help="Optional QuickSight Theme ARN to apply to the "
+                        "Analysis and Dashboard.")
+    p.add_argument("--asset-id", default=DEFAULT_ASSET_ID,
+                   help="Identifier used for both the Analysis and Dashboard. "
+                        "Override when running multiple parallel deployments "
+                        "in the same account.")
+    p.add_argument("--resource-prefix", default="kiro-analytics",
+                   help="Prefix used for QuickSight DataSet IDs. Must match "
+                        "the ResourcePrefix passed to the QS CFN stack.")
+    p.add_argument("--version", default=None,
+                   help="Version string from the repo's VERSION file. Recorded "
+                        "as the dashboard version's VersionDescription so a "
+                        "published dashboard can be traced back to the code "
+                        "that produced it. deploy.sh passes this automatically.")
+    p.add_argument("--name", default=None,
+                   help="Display name for the Analysis and Dashboard. Defaults "
+                        f"to '{DEFAULT_NAME}' for the default deployment and "
+                        f"'{DEFAULT_NAME} (<resource-prefix>)' for any other, so "
+                        "parallel deployments are distinguishable in the "
+                        "QuickSight console instead of appearing as identical "
+                        "rows.")
+    p.add_argument("--identity-mapping", action="store_true",
+                   help="Set when IAM Identity Center user mapping is enabled. "
+                        "Adds the idc_username / idc_email join-key columns to "
+                        "the user tables - they are only populated when mapping "
+                        "is on, so without this flag they are omitted rather "
+                        "than shown as empty columns. (The columns still exist "
+                        "on the datasets either way, so authors can add them.)")
+    args = p.parse_args()
+
+    qs = boto3.client("quicksight", region_name=args.region)
+    definition = build_definition(args.account_id, args.region,
+                                  args.resource_prefix,
+                                  identity_mapping=args.identity_mapping)
+
+    name = asset_name(args.resource_prefix, args.name)
+    common = dict(account_id=args.account_id, principal_arn=args.principal_arn,
+                  theme_arn=args.theme_arn, asset_id=args.asset_id,
+                  version=args.version, name=name)
+    print(f"Asset name: {name}", file=sys.stderr)
+    print("Upserting Analysis", file=sys.stderr)
+    upsert(qs, **common, is_dashboard=False, definition=definition)
+    print("Upserting Dashboard", file=sys.stderr)
+    upsert(qs, **common, is_dashboard=True, definition=definition)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

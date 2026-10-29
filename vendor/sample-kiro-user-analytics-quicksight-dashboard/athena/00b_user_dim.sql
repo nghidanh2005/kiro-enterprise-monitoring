@@ -1,0 +1,62 @@
+-- User dimension: single source of (user_id, email, user_label, subscription_tier).
+-- Other views join this instead of user_totals so the email/label logic is
+-- defined once.
+--
+-- Source: report_facts (the header-normalized table from
+-- normalize_report_lambda), not the raw export - so the email/tier columns are
+-- read by name, never by drifting position.
+--
+-- Email handling:
+--   • report_facts always has an `email` column (blank when the source export
+--     predates it), so ${email_expr} resolves to the column ref.
+--   • If HashEmails is on, ${email_expr} is sha256(email) - PII does not
+--     land in SPICE. Set via the HashEmails CFN parameter; deploy.sh wires the
+--     hash expression at view-render time.
+--
+-- Identity mapping:
+--   ${dim_user_label} / ${dim_identity_join} are rendered by build_views.py.
+--   OFF: label = email-or-uuid, join empty. ON: label = display_name -> email
+--   -> username -> uuid, join = LEFT JOIN identity_map. Same expression as
+--   base_user_activity / model_usage so all label sites agree.
+
+CREATE OR REPLACE VIEW ${database}.user_dim AS
+WITH email_per_user AS (
+    SELECT
+        userid                                 AS user_id,
+        -- The most-recent non-empty email, via max_by - NOT a lexical MAX.
+        -- MAX(email) returned the alphabetically-largest address, so after a
+        -- rename (zeta@ -> alpha@) user_dim kept the STALE one indefinitely, and
+        -- because user_label falls back to email the dashboard showed the old
+        -- identity forever. Under --hash-emails it was worse: a lexical max over
+        -- sha256 digests is effectively random with respect to recency.
+        -- NULLIF first so a blank never outranks a real address.
+        max_by(NULLIF(${email_expr}, ''),
+               TRY(CAST(date AS date)))        AS email,
+        -- Most-recent tier (the user's CURRENT plan), not a lexical MAX:
+        -- max_by picks the subscription_tier from the user's latest-dated row,
+        -- so an upgrade (e.g. Pro+ -> Power) shows immediately. A plain MAX
+        -- ranked 'PRO_PLUS' above 'POWER' alphabetically and hid upgrades.
+        -- Order by the CAST date, not the raw string: `date` is a varchar here,
+        -- so a non-ISO export format (e.g. M/D/YYYY) would sort '9/1/2026' above
+        -- '10/1/2026' and silently resurrect exactly the bug described above.
+        max_by(subscription_tier,
+               TRY(CAST(date AS date)))        AS subscription_tier_raw
+    FROM ${database}.report_facts
+    GROUP BY userid
+)
+SELECT
+    user_id,
+    NULLIF(email, '')                          AS email,
+    ${dim_user_label}                          AS user_label,
+    -- Identity Center join keys, exposed as their own columns so admins can map
+    -- dashboard rows to an external roster / subscription export. user_label is
+    -- only a DISPLAY string (a real name when mapping is on) and is not
+    -- reliably joinable; these are. Both are NULL when identity mapping is off
+    -- (the column set stays stable in both modes - the QuickSight DataSet
+    -- declares them unconditionally). Note `email` above is the KIRO REPORT's
+    -- email (often empty), whereas idc_email comes from the directory.
+    ${dim_idc_username}                        AS idc_username,
+    ${dim_idc_email}                           AS idc_email,
+    ${tier_label_dim}                          AS subscription_tier
+FROM email_per_user
+${dim_identity_join};

@@ -1,0 +1,445 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Kiro User Analytics - Data layer (AWS Glue + Athena). Provisions a Glue
+  database, an Athena workgroup with a dedicated results bucket, and a
+  report-normalizer Lambda that reads the Kiro User Activity Report CSVs by
+  header and writes a fixed-schema normalized copy (build_views.py registers
+  Athena external tables over it).
+
+Parameters:
+  KiroLogsBucketName:
+    Type: String
+    Description: >
+      Name of the existing S3 bucket where Kiro writes the User Activity
+      Report. The bucket policy must already grant the Kiro export service
+      principal s3:PutObject - configured by a Kiro administrator when the
+      export is enabled. See the Kiro user activity report documentation
+      linked from the README for setup steps.
+
+  KiroLogsPrefix:
+    Type: String
+    Default: ""
+    Description: >
+      Optional prefix inside the bucket BEFORE the "AWSLogs/<accountId>/KiroLogs/"
+      path. Leave blank if Kiro writes to the bucket root. No leading slash;
+      include a trailing slash if non-empty (e.g. "kiro/").
+
+  DatabaseName:
+    Type: String
+    Default: kiro_analytics
+    AllowedPattern: "[a-z][a-z0-9_]{0,62}"
+    Description: AWS Glue database name. Lower-case, underscores only.
+
+  WorkgroupName:
+    Type: String
+    Default: kiro_analytics
+
+  KmsKeyArn:
+    Type: String
+    Default: ""
+    Description: >
+      Optional KMS key ARN that encrypts the Kiro logs bucket. When set, the
+      report-normalizer Lambda role is granted kms:Decrypt on this key. Leave
+      blank for SSE-S3-only buckets (no extra grant needed).
+
+  NormalizerLambdaCodeS3Key:
+    Type: String
+    Default: ""
+    Description: >
+      S3 key of the normalize_report_lambda deployment zip staged in the
+      Athena results bucket by deploy.sh. Leave blank only on the very first
+      stack create before the zip is uploaded (deploy.sh stages the zip and
+      then updates the stack with the real key).
+
+  NormalizeSchedule:
+    Type: String
+    Default: "cron(15 3 * * ? *)"
+    Description: >
+      Daily schedule (UTC) for the report-normalizer Lambda. Default 03:15 -
+      the Kiro export (02:00 UTC) and before the 03:30 identity-map / 04:00
+      SPICE refreshes, so normalized data is current for each day's ingest.
+
+  AlarmEmail:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+    ConstraintDescription: Must be a valid email address, or left blank.
+    Description: >
+      Optional. Email address to notify when the report-normalizer fails or
+      stops running. Strongly recommended: the pipeline fails CLOSED, so
+      without an alarm a broken normalizer looks identical to a quiet day -
+      the dashboard keeps serving the last good data and nobody is told.
+      AWS sends a subscription-confirmation email that must be accepted
+      before notifications are delivered. Leave blank to skip alarms
+      entirely (no SNS topic is created).
+
+Conditions:
+  HasKmsKey: !Not [!Equals [!Ref KmsKeyArn, ""]]
+  HasNormalizerCode: !Not [!Equals [!Ref NormalizerLambdaCodeS3Key, ""]]
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
+  # Alarms reference the Lambda by name, so they can only exist once the
+  # function does (i.e. after deploy.sh stages the code zip).
+  HasAlarms: !And [!Condition HasAlarmEmail, !Condition HasNormalizerCode]
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Athena results bucket - separate from the Kiro logs bucket so Athena writes
+  # do not mingle with raw exports. Public access blocked, SSE-S3 encrypted,
+  # versioned, 30-day result retention, with a TLS-only bucket policy.
+  # Server access logging is intentionally not configured: enabling it would
+  # add a second bucket + bucket policy + teardown step to every customer
+  # deployment for an audit trail most do not need (CloudTrail covers the
+  # Athena query API events at the account level). Customers who require
+  # S3 access logging can enable it on this bucket post-deploy.
+  # ---------------------------------------------------------------------------
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: "Server access logging is opt-in for the customer; CloudTrail covers Athena API events at the account level."
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: "Server access logging is opt-in for the customer; see resource comment."
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-athena-results-${AWS::AccountId}-${AWS::Region}"
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          # Scope expiry to query-results/ ONLY. The normalized/ prefix holds
+          # the persistent, date-partitioned facts/models the dashboard reads -
+          # it must NOT expire. An unscoped rule here would silently delete
+          # normalized partitions older than 30 days.
+          #
+          # 7 days, not 30: these results are pure scratch (Athena rewrites them
+          # on every query, and nothing in the solution reads them back), but
+          # when IDENTITY_MAPPING is on they contain resolved names and email
+          # addresses - every SPICE refresh of a user-facing dataset writes a
+          # full result set here. Shortening the window is the cheapest way to
+          # bound that exposure without adding a CMK and its key policy to every
+          # deployment. See SECURITY.md "Containment and isolation".
+          - Id: ExpireQueryResults
+            Status: Enabled
+            Prefix: query-results/
+            ExpirationInDays: 7
+            NoncurrentVersionExpirationInDays: 1
+          # Normalized parts are retained, but keep noncurrent versions from
+          # accumulating forever (each daily re-write of a partition part makes
+          # the prior a noncurrent version).
+          - Id: ExpireNormalizedNoncurrent
+            Status: Enabled
+            Prefix: normalized/
+            NoncurrentVersionExpirationInDays: 30
+
+  # ---------------------------------------------------------------------------
+  # Bucket policy on the Athena results bucket - deny all non-TLS access.
+  # ---------------------------------------------------------------------------
+  AthenaResultsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AthenaResultsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt AthenaResultsBucket.Arn
+              - !Sub "${AthenaResultsBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # ---------------------------------------------------------------------------
+  # AWS Glue database. Note on encryption-at-rest: AWS Glue catalog encryption
+  # is an account+region-wide setting (AWS::Glue::DataCatalogEncryptionSettings),
+  # not a per-database property. We do not toggle it from this stack because
+  # doing so would affect every other AWS Glue database in the customer's
+  # account. Enable it once, account-wide, with:
+  #   aws glue put-data-catalog-encryption-settings \
+  #       --data-catalog-encryption-settings \
+  #       'EncryptionAtRest={CatalogEncryptionMode=SSE-KMS-WITH-SERVICE-MANAGED-KEY}'
+  # See README "Catalog encryption" section for guidance.
+  # ---------------------------------------------------------------------------
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Ref DatabaseName
+        Description: Kiro user activity analytics
+
+  # ---------------------------------------------------------------------------
+  # Athena workgroup - dedicated so cost / query history is isolated.
+  # EnforceWorkGroupConfiguration prevents per-query overrides of the result
+  # location and encryption. PublishCloudWatchMetricsEnabled emits per-query
+  # metrics (DataScannedInBytes, EngineExecutionTime, etc.) to CloudWatch.
+  # The audit trail for query starts/stops is via the AWS::Athena
+  # StartQueryExecution / GetQueryExecution API events recorded in
+  # AWS CloudTrail (account-level data-event setting; see README).
+  # ---------------------------------------------------------------------------
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Ref WorkgroupName
+      State: ENABLED
+      RecursiveDeleteOption: true
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        RequesterPaysEnabled: false
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${AthenaResultsBucket}/query-results/"
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+
+  # ---------------------------------------------------------------------------
+  # Report-normalizer Lambda. Reads the raw Kiro CSVs BY HEADER and writes a
+  # fixed-schema normalized copy (normalized/facts/, normalized/models/) to the
+  # results bucket. This is what makes ingestion immune to the raw export's
+  # drifting middle columns (the positional crawler misattributed per-model
+  # usage and corrupted new_user). build_views.py registers external tables
+  # over the normalized output; the views read those, not the raw table.
+  #
+  # IAM (least privilege): read-only on the Kiro logs bucket (source), and
+  # read+write ONLY under the normalized/ prefix of the results bucket. No
+  # Glue, no catalog, no wider S3.
+  # ---------------------------------------------------------------------------
+  NormalizerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadRawWriteNormalized
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadRawExport
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${KiroLogsBucketName}"
+                  - !Sub "arn:${AWS::Partition}:s3:::${KiroLogsBucketName}/*"
+              - Sid: WriteNormalizedOutput
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub "${AthenaResultsBucket.Arn}/normalized/*"
+              - Sid: ListResultsBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt AthenaResultsBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix: "normalized/*"
+        - !If
+          - HasKmsKey
+          - PolicyName: DecryptSourceKms
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action: kms:Decrypt
+                  Resource: !Ref KmsKeyArn
+          - !Ref AWS::NoValue
+        - PolicyName: Logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-normalize-report*"
+
+  NormalizerLambda:
+    Type: AWS::Lambda::Function
+    Condition: HasNormalizerCode
+    # checkov:skip=CKV_AWS_117: Not in a VPC - it calls only public AWS APIs (S3); a VPC would add NAT cost with no security gain.
+    # checkov:skip=CKV_AWS_116: No DLQ - the daily schedule retries next day and the function fails closed (leaves the prior normalized output); a DLQ adds ops surface without benefit for an idempotent daily rebuild.
+    # checkov:skip=CKV_AWS_173: Env vars are non-sensitive bucket/prefix names; default Lambda encryption suffices.
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-normalize-report"
+      Runtime: python3.14
+      Architectures: [arm64]
+      Handler: normalize_report_lambda.handler
+      # The streaming/incremental design processes one file at a time, so
+      # memory is flat regardless of seat count or history depth - observed
+      # peak is ~100 MB even on a full 300-user/120-day backfill, so 256 MB
+      # gives ample headroom. Timeout is generous for the rare full backfill
+      # (first deploy parses all historical files); steady state touches only
+      # the new daily file in a few seconds.
+      Timeout: 900
+      MemorySize: 256
+      ReservedConcurrentExecutions: 1
+      Role: !GetAtt NormalizerLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref AthenaResultsBucket
+        S3Key: !Ref NormalizerLambdaCodeS3Key
+      Environment:
+        Variables:
+          RAW_BUCKET: !Ref KiroLogsBucketName
+          RAW_PREFIX: !Sub "${KiroLogsPrefix}AWSLogs/${AWS::AccountId}/KiroLogs/user_report/"
+          OUT_BUCKET: !Ref AthenaResultsBucket
+          OUT_PREFIX: "normalized"
+
+  NormalizeRule:
+    Type: AWS::Events::Rule
+    Condition: HasNormalizerCode
+    Properties:
+      Name: !Sub "${AWS::StackName}-normalize-daily"
+      ScheduleExpression: !Ref NormalizeSchedule
+      State: ENABLED
+      Targets:
+        - Id: NormalizerLambda
+          Arn: !GetAtt NormalizerLambda.Arn
+
+  NormalizeRulePermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasNormalizerCode
+    Properties:
+      FunctionName: !Ref NormalizerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NormalizeRule.Arn
+
+  # ---------------------------------------------------------------------------
+  # Observability.
+  #
+  # The pipeline fails CLOSED: if the normalizer breaks, the previous normalized
+  # output stays in place and the dashboard keeps serving it. That is the right
+  # data behaviour, but it means a broken pipeline is indistinguishable from a
+  # quiet day - the only symptom is a max date that stops advancing, which
+  # nobody watches. These three resources make failure visible.
+  # ---------------------------------------------------------------------------
+
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlarmEmail
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-alarms"
+      DisplayName: Kiro analytics pipeline alarms
+      # SSE with the AWS-managed SNS key: alarm notifications carry a function
+      # name and a state reason, no customer data, so an AWS-managed key is
+      # proportionate and avoids adding a CMK (and its cost) to every deploy.
+      KmsMasterKeyId: alias/aws/sns
+      Subscription:
+        - Endpoint: !Ref AlarmEmail
+          Protocol: email
+
+  # 1) The normalizer ran and errored. Catches the per-file failure path (the
+  # handler raises when any file fails), an unhandled exception, and a timeout.
+  NormalizerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlarms
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-normalizer-errors"
+      AlarmDescription: >
+        The Kiro report-normalizer Lambda failed. The dashboard is still
+        serving the last good data, so nothing looks broken - but no new
+        Kiro activity is being ingested until this is resolved. Check the
+        Lambda's CloudWatch logs for "FAILED to normalize <key>" lines; a
+        malformed source export is the usual cause.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref NormalizerLambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # Errors is only emitted when an invocation fails, so absent data is the
+      # healthy state and must not flip the alarm.
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+  # 2) The normalizer did NOT run at all. An Errors alarm cannot see this: a
+  # disabled EventBridge rule, a deleted trigger, or a permission regression
+  # produces zero invocations and therefore zero errors, which looks identical
+  # to success. 26h of window tolerates a late run and clock skew around the
+  # daily schedule while still catching a genuinely missed day.
+  NormalizerNotRunningAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlarms
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-normalizer-not-running"
+      AlarmDescription: >
+        The Kiro report-normalizer has not run in over 26 hours, so the
+        dashboard is going stale. Check the EventBridge rule
+        (<stack>-normalize-daily) is ENABLED and still targets the function.
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref NormalizerLambda
+      Statistic: Sum
+      Period: 93600  # 26 hours
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      # Unlike the Errors alarm, MISSING data is exactly the failure here - no
+      # invocations at all means no metric is published, so missing must breach.
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+Outputs:
+  GlueDatabaseName:
+    Value: !Ref GlueDatabase
+    Export:
+      Name: !Sub "${AWS::StackName}-GlueDatabaseName"
+  NormalizerLambdaName:
+    Condition: HasNormalizerCode
+    Value: !Ref NormalizerLambda
+  AthenaWorkgroupName:
+    Value: !Ref AthenaWorkgroup
+    Export:
+      Name: !Sub "${AWS::StackName}-AthenaWorkgroup"
+  AthenaResultsBucket:
+    Value: !Ref AthenaResultsBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-AthenaResultsBucket"
+  KiroLogsBucketName:
+    Value: !Ref KiroLogsBucketName
+    Export:
+      Name: !Sub "${AWS::StackName}-KiroLogsBucket"
+  AlarmTopicArn:
+    Condition: HasAlarmEmail
+    Description: >
+      SNS topic for pipeline alarms. Confirm the emailed subscription before
+      notifications are delivered; add more subscribers here if needed.
+    Value: !Ref AlarmTopic

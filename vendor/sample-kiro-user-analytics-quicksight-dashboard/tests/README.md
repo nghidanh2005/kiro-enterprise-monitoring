@@ -1,0 +1,108 @@
+# Tests
+
+Fast, offline tests for the pieces of this solution that produce **plausible but
+wrong output** when they break. Every historical bug in this repo was silent — a
+number that looked reasonable and wasn't — so these tests target the invariants
+whose violation is invisible on the dashboard.
+
+No AWS account, no credentials, no network, no deployment. They run in a couple
+of seconds.
+
+## Running them
+
+```bash
+python3 -m unittest discover -s tests -v      # from the repo root
+scripts/run-checks.sh                          # tests + shell/CFN/Python linting
+```
+
+`unittest` ships with Python, so there is nothing to install. `run-checks.sh`
+additionally uses `shellcheck` and `cfn-lint` when they are present and skips
+them (with a notice) when they are not.
+
+## What each file covers, and which real bug it would have caught
+
+| File | Covers | Bug it guards against |
+|---|---|---|
+| `test_normalizer.py` | Header-keyed parsing, `_to_int`, `_export_ts`/`_export_date`, `_part_name` | Positional parsing misattributing per-model usage as Kiro's CSV header drifts; a non-finite cell aborting the whole run |
+| `test_tier_labels.py` | `tier_label_expr` substitution | A `CASE` whose `ELSE` returned a *different* expression than the one tested, which made a per-user-constant column non-constant and split users into multiple rows |
+| `test_sql_render.py` | Every view renders, splits into one statement, and leaves no placeholder | A `;` inside a `--` comment truncating a view; a new placeholder added to one branch only |
+| `test_view_order.py` | Views are applied in dependency order by filename sort | Adding `00a_*.sql` that reads `base_user_activity` would fail on a clean deploy but succeed on a redeploy — the worst possible failure signature |
+| `test_dataset_inventory.py` | `deploy.sh`'s dataset lists match the CloudFormation template | A hardcoded list drifting from the template, which left resolved PII in a SPICE dataset that the opt-out never purged |
+| `test_iam_policy.py` | Bucket-name validation, additive-policy semantics | An unvalidated bucket name rendering `arn:aws:s3:::*/*` onto the shared QuickSight role; a narrowing re-apply silently not narrowing |
+| `test_dashboard_definition.py` | Dataset references resolve, drill-through target, tier filter/display agreement | Filtering `subscription_tier` while grouping `user_tier`; a visual referencing a dataset that no longer exists |
+| `test_versioning.py` | `VERSION`/`CHANGELOG` agreement, every stack tagged, and the tag **merge** | `aws cloudformation deploy --tags` replaces rather than merges, so stamping a version tag would silently delete a customer's own cost-allocation tags — visible only weeks later in a billing report |
+| `test_cost_docs.py` | The README cost table recomputed from its own stated unit prices | A cost figure edited in one cell and left stale in another. Someone budgets from that table, so an inconsistent number is worse than no table |
+| `test_deploy_ordering.py` | Steps in `deploy.sh` that depend on something an earlier step creates | A step ordered before its dependency works on every re-deploy and fails only on a FRESH install — the path a developer never retests and every new customer takes. Log retention really was set before the invoke that creates the log group |
+| `test_helpers_stub.py` | The offline AWS stub covers every name `scripts/` imports, derived from the scripts themselves | A script importing a symbol the stub omits (`BotoCoreError` really did) fails with `cannot import name ... from 'botocore.exceptions'` — an error that points at botocore rather than at the stub |
+
+## What these tests deliberately cannot catch
+
+Being offline is the point, and it has one consequence worth stating outright:
+`test_cost_docs.py` reads only the README, so it detects internal
+**inconsistency** and never **staleness**. If AWS reprices a QuickSight reader
+tomorrow, all of its assertions still pass while the entire Cost section is
+wrong. No offline test can see that.
+
+The mitigations are deliberate rather than accidental: the figures are labelled
+`us-east-1` list price, the authoritative pricing pages are linked, and
+**`scripts/check_pricing.py`** diffs every documented price against the live AWS
+Price List API. That script is intentionally *not* in `run-checks.sh` or CI - it
+needs credentials and network, so it would fail for contributors without AWS
+access and break fork PRs, and AWS changing a price is not a contributor's fault.
+It runs at each release instead (see CONTRIBUTING.md "Versioning"), and tests
+here pin the script's expected prices to the README's so the two cannot drift
+apart silently.
+
+The script also reports what it *cannot* verify: the Price List API publishes no
+SKU for the plain $24 Author price, so that one needs a human glance at the
+pricing page. Checking a subset while implying the whole section was validated
+would be worse than saying so.
+
+## Conventions
+
+Tests import the scripts directly from `scripts/` — there is no package to
+install. Anything requiring AWS is out of scope by design: the point is that a
+contributor can run these before opening a PR without an account.
+
+## Are these tests actually load-bearing?
+
+Verified by mutation: each defect this repo has shipped was reintroduced into a
+clean copy of the tree, and the suite was run.
+
+| Reintroduced defect | Result |
+|---|---|
+| `CASE ... ELSE <different expression>` (the tier bug a customer reported) | 3 failures |
+| `_to_int` not catching `OverflowError` (one cell freezing the pipeline) | 3 errors |
+| A dataset dropped from `QS_LABEL_DATASETS` (PII left in SPICE after opt-out) | 1 failure |
+| Tier filter pointed at `subscription_tier` while visuals group `user_tier` | 2 failures |
+| A dimension inserted before `user_label`, retargeting the drill-through | 2 failures |
+| Version tag sent without merging the stack's existing tags | 8 failures |
+| `--tags` dropped from one of the four stack deploys | 1 failure (naming the stack) |
+| The `Key!=` filter removed, duplicating the version tag on upgrade | 2 failures |
+| `VersionDescription` set on the Analysis path too (which the API rejects) | 1 failure |
+| `VERSION` bumped without a `CHANGELOG.md` entry | 1 failure |
+| `BotoCoreError` removed from the offline AWS stub | 1 failure + 1 error |
+| A brand-new AWS import the stub has never seen (`EndpointConnectionError`) | 1 failure |
+| The stub returning `None` from `boto3.client` instead of refusing | 1 failure |
+| `DrillUser` back to `SINGLE_VALUED` (User detail accepts one user only) | 1 failure |
+| User picker back to a `SINGLE_SELECT` control | 1 failure |
+| `models` dropped from the User-detail drill filter (model split shows everyone) | 1 failure |
+| Per-user period table aggregating `credits_used` with `MAX` instead of `SUM` | 1 failure |
+| The post-invoke log-retention call removed (a first deploy keeps unbounded logs) | 1 failure |
+| A licence-table total edited to disagree with the stated per-user price | 1 failure |
+| The "243× bill increase" multiplier changed to a wrong figure | 1 failure |
+| "Entitle fewer readers" demoted from the top cost recommendation | 1 failure |
+| The $250/month account-fee subsection deleted | 1 failure |
+
+The suite returns to green when each mutation is reverted. A test that cannot
+fail is not protecting anything, so this check is worth repeating if the suite is
+substantially rewritten.
+
+One mutation initially **survived**, which is worth recording because it shows
+what this exercise is for: replacing the tab-delimited `IFS` in the tag merge
+with a plain `read -r key value` left the suite green. The tests covered spaces in
+tag *values* but not in tag *keys*, and `Cost Center` is a perfectly legal — and
+common — CloudFormation tag key that whitespace splitting would corrupt into a
+different tag. `test_keys_containing_spaces_survive` closes that gap.
+
+A second lesson came from the harness rather than the tests: one *reverted* file was still reported as mutated. Python's bytecode cache trusts a source file's mtime (1-second resolution) and size, and a `SUM` -> `MAX` edit keeps the size identical - so a restore and a test run inside the same second executed the mutated bytecode. `load()` in `_helpers.py` now always compiles from source, which matters most exactly when you are doing this kind of rapid mutate-and-revert check.
