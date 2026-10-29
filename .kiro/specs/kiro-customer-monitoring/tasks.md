@@ -7,7 +7,7 @@ Cách đọc:
 - **Phụ thuộc**: các task phải xong trước.
 - Mọi file riêng của khách nằm trong `customers/<khách>/` (gitignore).
 
-Trạng thái 2026-10-29: đã xong mọi phần làm được trên máy. Task đánh dấu [x] có số đo; các task còn lại có dòng 'Trạng thái' ghi phần đã xong và phần chờ. Mọi task còn lại chờ một trong ba thứ: quyết định D1-D8 (1.1), profile còn hạn (2.2, 2.3), hoặc xác nhận cho từng lần chạy **[XÁC NHẬN]**.
+Trạng thái 2026-10-29: đã xong mọi phần làm được mà không cần AWS, và D1-D8 đã chốt. Task đánh dấu [x] có số đo; các task còn lại có dòng 'Trạng thái' ghi phần đã xong và phần chờ. Việc còn lại đều cần AWS: profile còn hạn (2.2, 2.3) và xác nhận cho từng lần chạy **[XÁC NHẬN]**.
 
 Sơ đồ phụ thuộc chính:
 ```
@@ -42,7 +42,8 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - _Requirements: 1.1, 1.2, 1.3_
 
 - [ ] 1. Chốt phạm vi và sự đồng ý
-  - [ ] 1.1 người vận hành chốt quyết định D1-D8 trong `design.md` mục 10
+  - [x] 1.1 người vận hành chốt quyết định D1-D8 trong `design.md` mục 10
+    - Trạng thái 2026-10-29: D1-D8 chốt theo đề xuất, cột 'Đã chốt' trong `design.md` mục 10. D2 và D7 vẫn kèm điều kiện đo.
     - Người làm: người vận hành
     - Xong khi: mỗi dòng D1-D8 có cột "Đã chốt" kèm ngày.
     - _Requirements: 3.2, 7.1, 8.5, 11.1, 13.3_
@@ -220,6 +221,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Phụ thuộc: 4.10
     - _Requirements: 6.4_
   - [ ] 4.12 Đối chiếu CUR khi có dữ liệu
+    - Trạng thái 2026-10-29: `tools/reconcile.py --checks cur` so Athena với Cost Explorer, ngưỡng 1%, có test. Chờ dữ liệu CUR.
     - Người làm: Agent
     - Xong khi: `customers/<khách>/BASELINE.md` có tổng phí Kiro theo từng tháng ở Athena và ở Cost Explorer của account payer, lệch dưới 1%. Ghi tháng sớm nhất có trong CUR.
     - Phụ thuộc: 4.3, 4.11
@@ -277,6 +279,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Phụ thuộc: 4.9, 5.7
     - _Requirements: 5.4, 8.2_
   - [ ] 5.9 Kiểm normalizer và đối chiếu với CID
+    - Trạng thái 2026-10-29: `tools/reconcile.py --checks users` so CID với sample trên cùng khoảng ngày, có test. Chờ deploy.
     - Gọi normalizer, đếm object dưới `normalized/facts/` và `normalized/models/`, refresh SPICE.
     - Người làm: Agent
     - Xong khi: số user distinct trong 30 ngày ở view của sample bằng số ở bảng CID cho cùng khoảng ngày. Ghi cả hai số vào `BASELINE.md`.
@@ -363,11 +366,13 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Phụ thuộc: 8.1
     - _Requirements: 12.3, 12.4_
   - [ ] 8.3 Đo tỷ lệ nối
+    - Trạng thái 2026-10-29: `tools/reconcile.py --checks identity promptmeta` đo hai tỷ lệ, có test. Chờ lớp 4.
     - Người làm: Agent
     - Xong khi: `BASELINE.md` ghi tỷ lệ request nối được ra danh tính user, và tỷ lệ nối được metadata prompt (khi D4 = có).
     - Phụ thuộc: 8.2
     - _Requirements: 16.4, 16.5_
   - [ ] 8.4 Kiểm cô lập giữa các khách
+    - Trạng thái 2026-10-29: `tools/reconcile.py --checks isolation` đếm account_id distinct, có test. Chờ lớp 4.
     - Với mỗi dataset của khách, đếm `account_id` distinct.
     - Người làm: Agent
     - Xong khi: số đếm bằng số account của khách đó trong `config.json`.
@@ -409,6 +414,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Người làm: Agent
     - _Requirements: 1.5, 18.2, 19.2_
   - [ ] 10.3 Chốt baseline và bảng chi phí
+    - Trạng thái 2026-10-29: `tools/reconcile.py` ghi `customers/<khách>/BASELINE.md` với nguồn của từng số. Chờ dữ liệu thật.
     - Người làm: Agent
     - Xong khi: `BASELINE.md` có đủ các số của Requirement 16. Bảng chi phí trong `design.md` mục 9 không còn dòng **[CHƯA XÁC MINH]** nào chưa có lý do.
     - _Requirements: 16.1, 17.1_
@@ -418,7 +424,8 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Người làm: Agent
     - Xong khi: plan chỉ thêm resource mang tên khách giả, không sửa resource của khách thật, và không phải đổi dòng code nào.
     - _Requirements: 18.3_
-  - [ ] 10.5 Commit
+  - [x] 10.5 Commit
+    - Trạng thái 2026-10-29: scan rỗng trên 70+ file của nhánh, PR #1 mở rồi squash-merge vào main.
     - Chạy `tools/scan_staged.py` trên danh sách đã stage, kết quả phải rỗng. Commit lên nhánh riêng, mở PR.
     - Người làm: Agent
     - Xong khi: scan rỗng, PR đã mở.

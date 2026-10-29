@@ -43,8 +43,14 @@ def render(database: str, *, identity_map: bool = True, promptmeta: bool = False
         raise SystemExit("--user-id-expr must be a ct.<field>[.<field>] path")
     joins, label_parts, meta_cols = [], [], []
     if identity_map:
-        joins.append(f"LEFT JOIN {db}.identity_map im ON im.user_id = base.user_id")
-        label_parts += ["NULLIF(im.display_name, '')", "NULLIF(im.username, '')"]
+        # Column names and the one-row-per-user collapse follow the sample's own
+        # identity_map table (scripts/build_views.py lines 277-280 and 352-365).
+        joins.append(
+            "LEFT JOIN (SELECT idc_user_id, max(idc_username) AS idc_username, "
+            f"max(idc_display_name) AS idc_display_name FROM {db}.identity_map GROUP BY idc_user_id) im "
+            "ON im.idc_user_id = base.user_id"
+        )
+        label_parts += ["NULLIF(im.idc_display_name, '')", "NULLIF(im.idc_username, '')"]
     joins.append(
         "LEFT JOIN (SELECT userid, max(NULLIF(email, '')) AS email "
         f"FROM {db}.report_facts GROUP BY userid) rf ON rf.userid = base.user_id"

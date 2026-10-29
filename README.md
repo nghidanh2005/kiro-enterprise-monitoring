@@ -80,6 +80,7 @@ The full list (OQ-1 to OQ-13) and the decisions still open (D1 to D8) are in [`d
 | `tools/measure_oq.py` | Measures the open questions from temporary buckets. Prints only counts and ID shapes, never content |
 | `tools/scan_staged.py` | Blocks account IDs, Identity Store IDs, `ssoins-` IDs, customer names and em dashes in `*.tf` from commits |
 | `tools/build_audit_views.py` | Renders the audit view. Never selects source IP, request payloads or the full user agent |
+| `tools/reconcile.py` | Checks dashboard numbers against a second source (Cost Explorer, CID vs sample) and writes the customer baseline |
 | `tools/package_sample.py` | Reproducible zip of the patched sample for CloudShell, with a SHA256 file |
 | `infra/customer/` | Customer-side modules: report bucket policy, Identity Center read role, data-event trail, prompt-log bucket, prompt metadata Lambda, Kiro-only CUR export |
 | `infra/observability/` | Observability-side modules: trail bucket, prompt metadata bucket, audit dashboard, freshness check |

@@ -47,6 +47,22 @@ class TestRender(unittest.TestCase):
         self.assertIn("identity_map", bav.render("kiro_acme", identity_map=True))
         self.assertNotIn("identity_map", bav.render("kiro_acme", identity_map=False))
 
+    def test_columns_read_from_sample_tables_exist_in_the_sample_ddl(self):
+        """Guards the bug where the view used im.user_id although the table has idc_user_id."""
+        import re
+        ddl = (pathlib.Path(__file__).resolve().parents[2] / "vendor" /
+               "sample-kiro-user-analytics-quicksight-dashboard" / "scripts" / "build_views.py").read_text(encoding="utf-8")
+        im_cols = set(re.findall(r"^\s*f\"\s{4}(idc_\w+)\s", ddl, re.M))
+        self.assertEqual(im_cols, {"idc_user_id", "idc_username", "idc_display_name", "idc_email"})
+        facts = ddl.split("report_facts_raw (")[1].split(")")[0]
+        rf_cols = set(re.findall(r"^\s*f\"\s{4}(\w+)\s", facts, re.M))
+        sql = bav.render("kiro_acme", identity_map=True)
+        used_im = set(re.findall(r"\bidc_\w+", sql))
+        self.assertTrue(used_im <= im_cols, used_im - im_cols)
+        for col in ("userid", "email"):
+            self.assertIn(col, rf_cols)
+        self.assertNotRegex(sql, r"\bim\.(user_id|username|display_name)\b")
+
     def test_rejects_unsafe_identifiers_and_expressions(self):
         with self.assertRaises(SystemExit):
             bav.render("kiro_acme; drop table x")
