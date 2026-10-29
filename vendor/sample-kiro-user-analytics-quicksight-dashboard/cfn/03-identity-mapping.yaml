@@ -98,37 +98,11 @@ Conditions:
 
 Resources:
 
-  # ---------------------------------------------------------------------------
-  # KMS key for the identity-map bucket. This bucket holds real names + emails
-  # (PII) resolved from the directory, so - unlike the Athena results bucket
-  # (transient query scratch, SSE-S3) - it gets a dedicated CMK, access
-  # logging, and TLS-only enforcement.
-  # ---------------------------------------------------------------------------
-  IdentityMapKey:
-    Type: AWS::KMS::Key
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      Description: !Sub "Encrypts the Kiro identity-map PII bucket (${ResourcePrefix})"
-      EnableKeyRotation: true
-      KeyPolicy:
-        Version: "2012-10-17"
-        Statement:
-          # Root statement delegates access control to IAM, so the Lambda
-          # role's scoped kms:Encrypt/GenerateDataKey policy is sufficient.
-          # (An explicit key-policy grant to the role ARN here would create a
-          # KMS-key <-> role circular dependency at stack-create time.)
-          - Sid: AccountRoot
-            Effect: Allow
-            Principal: { AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" }
-            Action: "kms:*"
-            Resource: "*"
-
-  IdentityMapKeyAlias:
-    Type: AWS::KMS::Alias
-    Properties:
-      AliasName: !Sub "alias/${ResourcePrefix}-identity-map"
-      TargetKeyId: !Ref IdentityMapKey
+  # PATCH P4 (kiro-enterprise-monitoring): no KMS key. Upstream created a
+  # dedicated CMK (IdentityMapKey + alias) for the identity-map bucket. This
+  # deployment encrypts that bucket with SSE-S3 instead (decided 2026-10-29),
+  # so there is no per-customer key fee and no key left behind after teardown.
+  # Access logging, versioning and TLS-only enforcement below are unchanged.
 
   # ---------------------------------------------------------------------------
   # Access-log bucket for the identity-map bucket. Server access logging IS
@@ -173,7 +147,7 @@ Resources:
             NoncurrentVersionExpirationInDays: 90
 
   # ---------------------------------------------------------------------------
-  # Dedicated PII bucket for the identity-map CSV. KMS-encrypted, access
+  # Dedicated PII bucket for the identity-map CSV. SSE-S3 (PATCH P4), access
   # logging on, versioned, TLS-only (policy below), 90-day lifecycle. Read is
   # scoped (via the QuickSight S3 grant the deploy script writes) to the QS
   # service role; the Lambda writes it.
@@ -194,10 +168,9 @@ Resources:
         RestrictPublicBuckets: true
       BucketEncryption:
         ServerSideEncryptionConfiguration:
+          # PATCH P4 (kiro-enterprise-monitoring): SSE-S3 instead of the CMK.
           - ServerSideEncryptionByDefault:
-              SSEAlgorithm: aws:kms
-              KMSMasterKeyID: !Ref IdentityMapKey
-            BucketKeyEnabled: true
+              SSEAlgorithm: AES256
       VersioningConfiguration:
         Status: Enabled
       LoggingConfiguration:
@@ -266,7 +239,6 @@ Resources:
   #   * Glue: read the table the query touches
   #   * S3: read source data (results bucket scratch + Kiro logs via Athena),
   #     write the PII CSV to the identity-map bucket, read its own code zip
-  #   * KMS: encrypt with the identity-map CMK
   #   * Logs: its own log group
   # ---------------------------------------------------------------------------
   IdentityMapLambdaRole:
@@ -367,16 +339,7 @@ Resources:
                 Resource:
                   - !GetAtt IdentityMapBucket.Arn
                   - !Sub "${IdentityMapBucket.Arn}/*"
-        - PolicyName: KmsForIdentityMap
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: EncryptIdentityMap
-                Effect: Allow
-                Action:
-                  - kms:Encrypt
-                  - kms:GenerateDataKey
-                Resource: !GetAtt IdentityMapKey.Arn
+        # PATCH P4 (kiro-enterprise-monitoring): KmsForIdentityMap removed (no CMK).
         - !If
           - HasSourceKmsKey
           - PolicyName: DecryptSourceData
@@ -460,5 +423,3 @@ Outputs:
       Name: !Sub "${AWS::StackName}-IdentityMapBucket"
   IdentityMapLambdaName:
     Value: !Ref IdentityMapLambda
-  IdentityMapKeyArn:
-    Value: !GetAtt IdentityMapKey.Arn

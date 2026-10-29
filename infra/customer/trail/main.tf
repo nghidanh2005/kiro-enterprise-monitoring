@@ -1,6 +1,7 @@
 # Trail in the customer's Kiro account (task 6.3). Data events of
 # AWS::CodeWhisperer::Profile only, no management events. Delivers to the
-# observability account's bucket, encrypted with that account's KMS key.
+# observability account's bucket. No KMS key: log files use the bucket's
+# SSE-S3 default (decided 2026-10-29).
 # Provider: customer Kiro account, Region of the Kiro profile.
 
 terraform {
@@ -17,11 +18,6 @@ variable "trail_name" {
 
 variable "bucket_name" {
   description = "Output bucket_name of infra/observability/trail-bucket."
-  type        = string
-}
-
-variable "kms_key_arn" {
-  description = "Output kms_key_arn of infra/observability/trail-bucket (full ARN, the key is in another account)."
   type        = string
 }
 
@@ -47,7 +43,6 @@ locals {
 resource "aws_cloudtrail" "this" {
   name                          = var.trail_name
   s3_bucket_name                = var.bucket_name
-  kms_key_id                    = var.kms_key_arn
   is_multi_region_trail         = false
   include_global_service_events = false
   enable_log_file_validation    = true
@@ -76,10 +71,6 @@ resource "aws_cloudtrail" "this" {
   }
 
   lifecycle {
-    precondition {
-      condition     = can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:${var.observability_account_id}:key/", var.kms_key_arn))
-      error_message = "kms_key_arn must be a key in the observability account."
-    }
     precondition {
       condition     = endswith(var.bucket_name, "-${var.observability_account_id}")
       error_message = "bucket_name must be the trail bucket of the observability account (name ends with its account ID)."

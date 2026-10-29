@@ -480,7 +480,7 @@ python3 "${ROOT}/scripts/build_views.py" \
 # names show up on the FIRST dashboard open; the stack's daily schedule only
 # keeps the map fresh thereafter.
 IDMAP_BUCKET=""
-IDMAP_KEY_ARN=""
+# PATCH P4 (kiro-enterprise-monitoring): IDMAP_KEY_ARN removed, the identity-map bucket is SSE-S3.
 PURGE_IDMAP=""
 if [[ "${IDENTITY_MAPPING}" == "true" ]]; then
     echo ">> Packaging identity-map Lambda"
@@ -527,8 +527,6 @@ if [[ "${IDENTITY_MAPPING}" == "true" ]]; then
         --query "Stacks[0].Outputs[?OutputKey=='IdentityMapBucketName'].OutputValue" --output text)"
     IDMAP_LAMBDA="$(aws cloudformation describe-stacks --region "${REGION}" --stack-name "${IDMAP_STACK}" \
         --query "Stacks[0].Outputs[?OutputKey=='IdentityMapLambdaName'].OutputValue" --output text)"
-    IDMAP_KEY_ARN="$(aws cloudformation describe-stacks --region "${REGION}" --stack-name "${IDMAP_STACK}" \
-        --query "Stacks[0].Outputs[?OutputKey=='IdentityMapKeyArn'].OutputValue" --output text)"
 
     # Seed a header-only CSV if none exists yet, so the external table + LEFT
     # JOIN never error on a brand-new deployment where the Lambda finds no
@@ -614,12 +612,12 @@ fi
 # Kiro logs bucket is read-only (source data). Athena results bucket needs
 # write too - Athena queries run by QuickSight write their results there.
 QS_S3_BUCKET_SPECS=("${KIRO_LOGS_BUCKET}:read" "${RESULTS_BUCKET}:read_write")
-# When identity mapping is on, QS/Athena also read the SSE-KMS identity-map
-# bucket; grant read on the bucket + kms:Decrypt on its CMK.
+# When identity mapping is on, QS/Athena also read the identity-map bucket.
+# PATCH P4 (kiro-enterprise-monitoring): the bucket is SSE-S3, so QS needs
+# bucket read only; no --kms-key-arn is passed.
 QS_KMS_ARGS=()
 if [[ -n "${IDMAP_BUCKET}" ]]; then
     QS_S3_BUCKET_SPECS+=("${IDMAP_BUCKET}:read")
-    QS_KMS_ARGS=(--kms-key-arn "${IDMAP_KEY_ARN}")
 fi
 # Guarded expansion: macOS bash 3.2 trips `set -u` on an empty array.
 set +e

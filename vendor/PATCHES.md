@@ -22,10 +22,11 @@
 | `scripts/deploy.sh` | `ad857299fd009dfce1ca3fcdc1c52c2fae327cce58b98522206fbd2676e24b43` |
 | `scripts/preflight.sh` | `804e60cc696ad0d292aa635d4680201409dfdd0dc7846d1e3659b98253fbc1b2` |
 | `scripts/identity_map_lambda.py` | `34a58a1795ddb00e82bc1d9c0dc9cb6311a30d494ed3c24f6c1dc9b3708476f8` |
+| `scripts/teardown.sh` | `fc3092a889f1e51180e4c8746a861bdfea84b685e23f9658dba6ddf2c381dfa3` |
 
 ## Patches
 
-Each patch keeps upstream behaviour when its new input is empty. Every inserted block is marked `PATCH P<n> (kiro-enterprise-monitoring)`.
+P1-P3 keep upstream behaviour when their new input is empty. P4 changes upstream behaviour unconditionally (decision D9 in `design.md`). Every inserted block is marked `PATCH P<n> (kiro-enterprise-monitoring)`.
 
 ### P1. Report written by another account
 
@@ -42,21 +43,34 @@ Each patch keeps upstream behaviour when its new input is empty. Every inserted 
 - `cfn/03-identity-mapping.yaml`: new parameter `IdcExternalId` (default `""`) wired to the Lambda environment as `IDC_EXTERNAL_ID`.
 - `scripts/deploy.sh`: reads `IDC_EXTERNAL_ID` (default `""`) and passes `IdcExternalId=${IDC_EXTERNAL_ID}` to the identity-map stack.
 
-Diff size against `d73fc39`: 5 files, 47 insertions, 9 deletions.
+### P4. No KMS key for the identity map
+
+Added 2026-10-29. The operator chose SSE-S3 for every bucket this project creates (D9), to drop the per-customer key fee.
+
+- `cfn/03-identity-mapping.yaml`: `IdentityMapKey` (`AWS::KMS::Key`, `DeletionPolicy: Retain`) and `IdentityMapKeyAlias` removed. `IdentityMapBucket` uses `SSEAlgorithm: AES256` without `BucketKeyEnabled`. The Lambda role's `KmsForIdentityMap` policy and the `IdentityMapKeyArn` output removed. Access logging, versioning, the TLS-only bucket policy and Block Public Access are unchanged.
+- `scripts/deploy.sh`: no longer reads `IdentityMapKeyArn`, and no longer passes `--kms-key-arn` to `grant_quicksight_s3.py`. QuickSight still gets `read` on the identity-map bucket.
+- `scripts/teardown.sh`: the "identity-map KMS key is retained" note removed.
+- Not changed: `SourceKmsKeyArn` and `KMS_KEY_ARN`, the optional pass-through for a key the customer owns on the report bucket. This project requires that bucket to be SSE-S3, so the value stays empty.
+- Not changed: upstream `README.md` and `SECURITY.md` still describe the dedicated CMK. For this repo, this section replaces those statements.
+- Trade-off: anyone with `s3:GetObject` on the identity-map bucket can read names and emails. There is no second `kms:Decrypt` check and no CloudTrail record of key use per read.
+
+Diff size against `d73fc39`, tests excluded: 6 files, 63 insertions, 68 deletions. P4 alone: 3 files, 16 insertions, 59 deletions.
 
 ## Tests
 
-New file `tests/test_crossaccount_patches.py`, 13 tests. Each patch is tested with its new input both set and empty.
+`tests/test_crossaccount_patches.py` has 13 tests for P1-P3. Each patch is tested with its new input both set and empty. `tests/test_no_kms_patch.py` has 7 tests for P4.
 
 | Run | Ran | Pass | Error | Skipped |
 |---|---|---|---|---|
 | Upstream, before patching | 145 | 134 | 10 | 1 |
-| After patching | 158 | 147 | 10 | 1 |
+| After P1-P3 | 158 | 147 | 10 | 1 |
+| After P1-P4 | 165 | 154 | 10 | 1 |
 
 - The 10 errors are the same in both runs, all in `test_versioning.TestTagMerge`. That test starts `bash` through Python `subprocess`, which on this Windows machine resolves to the WSL launcher in System32 instead of Git Bash and fails with a WSL RPC error. They do not touch any patched code path.
 - Against the five upstream files restored byte-exact, 9 of the 13 new tests fail. The 4 that pass on upstream guard upstream behaviour that must survive (one `Conditions` block, the same-account `FAIL`, no `ExternalId` when the variable is empty or unset).
-- `cfn-lint` 1.52.0 on all three templates: 0 findings before and after.
-- `bash -n` on `deploy.sh` and `preflight.sh`: 0 errors after patching.
+- P4: against the three upstream files restored byte-exact, all 7 P4 tests fail.
+- `cfn-lint` 1.52.0 on all three templates: 0 findings before and after, including after P4.
+- `bash -n` on `deploy.sh`, `preflight.sh` and `teardown.sh`: 0 errors after patching.
 - `preflight.sh` run under Git Bash with a stub `aws` CLI: cross-account prints `[WARN] report bucket belongs to account ...` and makes 0 list calls on the bucket; same-account still prints `[FAIL] user_report not found` after 1 list call.
 
 ## Remaining account-pinned paths
@@ -69,4 +83,4 @@ New file `tests/test_crossaccount_patches.py`, 13 tests. Each patch is tested wi
 
 ## Upgrading the sample
 
-Export the new upstream commit the same way, re-apply P1-P3 by searching for the `PATCH P<n>` markers, re-run the test suite, and update the tables above.
+Export the new upstream commit the same way, re-apply P1-P4 by searching for the `PATCH P<n>` markers, re-run the test suite, and update the tables above.

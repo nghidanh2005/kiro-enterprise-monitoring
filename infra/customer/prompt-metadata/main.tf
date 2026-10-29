@@ -24,11 +24,6 @@ variable "prompt_prefix" {
   default = "kiro-prompt-logs/"
 }
 
-variable "prompt_kms_key_arn" {
-  description = "Output kms_key_arn of infra/customer/prompt-logs. Its key policy delegates to IAM, so the role policy below is enough."
-  type        = string
-}
-
 variable "destination_bucket" {
   description = "Output bucket_name of infra/observability/prompt-metadata."
   type        = string
@@ -73,7 +68,6 @@ locals {
     Version = "2012-10-17"
     Statement = [
       { Sid = "ReadPromptLogs", Effect = "Allow", Action = "s3:GetObject", Resource = "arn:${local.p}:s3:::${var.prompt_bucket_name}/${var.prompt_prefix}*" },
-      { Sid = "DecryptPromptLogs", Effect = "Allow", Action = "kms:Decrypt", Resource = var.prompt_kms_key_arn },
       {
         Sid      = "WriteMetadataOnly"
         Effect   = "Allow"

@@ -22,7 +22,6 @@ identity_map_role_arn = null # set after task 5.7
 # Task 6.3, only after OQ-1.
 enable_trail      = false
 trail_bucket_name = "kiro-mon-trail-acme-444455556666"
-trail_kms_key_arn = "arn:aws:kms:ap-southeast-1:444455556666:key/<id>"
 trail_event_names = []
 
 # Tasks 7.1 and 7.5.

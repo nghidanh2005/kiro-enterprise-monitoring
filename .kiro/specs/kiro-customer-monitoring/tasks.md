@@ -102,7 +102,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
 - [ ] 3. Đo OQ-1, OQ-2, OQ-3, OQ-4, OQ-9, OQ-11 bằng resource tạm
   - [ ] 3.1 Viết Terraform `infra/experiments/oq/`
     - Trạng thái 2026-10-29: `infra/experiments/oq/` xong, test với provider giả lập pass. Chờ D7 và một lần `terraform plan` thật.
-    - Bucket tạm cho CloudTrail, lifecycle xoá sau 3 ngày. Bucket tạm cho prompt log, SSE-KMS, key policy thử cho `q.amazonaws.com`. Trail chỉ lấy data event `AWS::CodeWhisperer::Profile`.
+    - Bucket tạm cho CloudTrail, lifecycle xoá sau 3 ngày. Bucket tạm cho prompt log, SSE-S3 (D9), bucket policy cho `q.amazonaws.com`. Trail chỉ lấy data event `AWS::CodeWhisperer::Profile`.
     - Đặt bucket CloudTrail ở `ap-southeast-1` để trả lời OQ-11. Nếu API từ chối thì ghi lại lỗi rồi chuyển bucket về region của trail.
     - Provider dùng `allowed_account_ids` bằng account đã chốt ở D7.
     - Người làm: Agent
@@ -257,6 +257,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
     - Xong khi: số test pass không giảm so với 5.1. `cfn-lint` không có lỗi mới. `vendor/PATCHES.md` liệt kê từng dòng đã sửa.
     - Phụ thuộc: 5.2, 5.3, 5.4
     - _Requirements: 7.4_
+    - Trạng thái 2026-10-29 (D9): thêm bản vá P4, bucket identity map dùng SSE-S3, bỏ KMS key riêng của sample. 7 test mới trong `tests/test_no_kms_patch.py` pass, và cả 7 fail trên file gốc. `cfn-lint` 1.52.0 trên 3 template: 0 lỗi. Chi tiết ở `vendor/PATCHES.md`.
   - [ ] 5.6 Tạo role đọc Identity Center ở account khách (khi D8 = có) **[XÁC NHẬN]**
     - Trạng thái 2026-10-29: module xong, 4 test pass (trust trước và sau khi thu hẹp, chặn ID instance, chặn role ở account khác). Chờ xác nhận để apply.
     - Module `infra/customer/idc-read-role`. Ở bước này chưa biết ARN của role Lambda identity map, nên trust policy tạm dùng principal là account trung tâm kèm hai điều kiện: `aws:PrincipalArn` khớp `arn:aws:iam::<observability-account-id>:role/kiro-<khách>-identity-map*`, và `sts:ExternalId`. Sau task 5.7 thì thu hẹp về đúng ARN của role.
@@ -294,7 +295,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
 - [ ] 6. Lớp 4: CloudTrail data events (chỉ khi OQ-1 có event)
   - [ ] 6.1 Viết `infra/observability/trail-bucket`
     - Trạng thái 2026-10-29: module xong, 2 test pass, gồm điều kiện 'không có principal * ngoài Deny'. Region bucket vẫn chờ OQ-11.
-    - Bucket, KMS key, bucket policy và key policy theo `design.md` mục 3.4, đặt ở region đã chốt bằng OQ-11. Thêm bảng Athena dùng partition projection. Gắn tag `Project=kiro-monitoring`, `Customer=<khách>`.
+    - Bucket SSE-S3 (D9) và bucket policy theo `design.md` mục 3.4, đặt ở region đã chốt bằng OQ-11. Thêm bảng Athena dùng partition projection. Gắn tag `Project=kiro-monitoring`, `Customer=<khách>`.
     - Người làm: Agent
     - Xong khi: `terraform validate` pass. Plan không có principal `*` ngoài các statement `Deny`.
     - Phụ thuộc: 3.6
@@ -320,7 +321,7 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
 - [ ] 7. Lớp 5: prompt logging
   - [ ] 7.1 Viết và apply `infra/customer/prompt-logs` **[XÁC NHẬN]**
     - Trạng thái 2026-10-29: module xong, 3 test pass, gồm điều kiện plan không chứa account trung tâm.
-    - Bucket SSE-KMS (key policy theo kết quả OQ-9), Block Public Access, chặn kết nối không TLS, lifecycle theo thời gian giữ khách chọn, bảng Athena và role `kiro-prompt-auditor` của khách. Không có principal nào của account trung tâm.
+    - Bucket SSE-S3 (D9), Block Public Access, chặn kết nối không TLS, lifecycle theo thời gian giữ khách chọn, bảng Athena và role `kiro-prompt-auditor` của khách. Không có principal nào của account trung tâm.
     - Người làm: Agent, người vận hành (xác nhận)
     - Xong khi: plan không có ARN nào chứa `<observability-account-id>`. Apply xong.
     - Phụ thuộc: 3.6, 1.2
@@ -406,11 +407,11 @@ Task 4 và 5 chạy song song được sau task 2. Task 6, 7 và 8 phải chờ 
 
 - [ ] 10. Bàn giao
   - [x] 10.1 Viết `docs/RUNBOOK.md`
-    - Gồm các quy trình: thêm khách mới, gắn lại bucket policy sau khi CID deploy lại, refresh SPICE bằng tay, nâng cấp sample (vá lại P1-P3 trên commit mới), cách đọc cảnh báo, mẫu Support case xin backfill CUR.
+    - Gồm các quy trình: thêm khách mới, gắn lại bucket policy sau khi CID deploy lại, refresh SPICE bằng tay, nâng cấp sample (vá lại P1-P4 trên commit mới), cách đọc cảnh báo, mẫu Support case xin backfill CUR.
     - Người làm: Agent
     - _Requirements: 18.1, 6.6, 3.3_
   - [x] 10.2 Viết `docs/TEARDOWN.md`
-    - Theo từng lớp, gồm lệnh cho cả account trung tâm lẫn account khách, kèm thứ tự gỡ. Thứ tự là gỡ trail và Lambda metadata trước, sau đó tới bucket. Ghi rõ KMS key của identity map vẫn còn sau teardown của sample.
+    - Theo từng lớp, gồm lệnh cho cả account trung tâm lẫn account khách, kèm thứ tự gỡ. Thứ tự là gỡ trail và Lambda metadata trước, sau đó tới bucket. Không có KMS key nào phải gỡ (D9, bản vá P4).
     - Người làm: Agent
     - _Requirements: 1.5, 18.2, 19.2_
   - [ ] 10.3 Chốt baseline và bảng chi phí

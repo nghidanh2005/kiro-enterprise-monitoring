@@ -97,11 +97,9 @@ PY
     aws cloudformation delete-stack --stack-name "${IDMAP_STACK}" --region "${REGION}"
     aws cloudformation wait stack-delete-complete --stack-name "${IDMAP_STACK}" --region "${REGION}" \
         && echo "   stack deleted" \
-        || echo "   stack delete still settling; check for a Retain'd KMS key/bucket" >&2
-    # The KMS key has DeletionPolicy: Retain (it's a CMK). It is orphaned, not
-    # billed beyond the key itself; schedule its deletion manually if desired:
-    echo "   note: the identity-map KMS key is retained (alias/${STACK_PREFIX}-identity-map);"
-    echo "         schedule-key-deletion manually if you want it gone."
+        || echo "   stack delete still settling; check for a Retain'd bucket" >&2
+    # PATCH P4 (kiro-enterprise-monitoring): no identity-map KMS key exists,
+    # so nothing is retained here beyond what the bucket loop above handled.
 else
     echo "   not present"
 fi

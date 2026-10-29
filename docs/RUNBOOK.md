@@ -61,7 +61,7 @@ cid-cmd refresh --dashboard-id kiro-user-activity
 
 1. Export commit mới bằng `git -c core.autocrlf=false archive`, giải nén đè vào `vendor/sample-kiro-user-analytics-quicksight-dashboard/`, commit riêng một commit "vendor: unmodified".
 2. Kiểm `git hash-object --no-filters` của từng file bằng blob upstream, như `vendor/PATCHES.md` ghi.
-3. Vá lại P1-P3: tìm các khối `PATCH P<n>` trong commit trước, áp lại đúng các dòng đó.
+3. Vá lại P1-P4: tìm các khối `PATCH P<n>` trong commit trước, áp lại đúng các dòng đó.
 4. Chạy test gốc trước và sau khi vá, `cfn-lint`, rồi cập nhật bảng trong `vendor/PATCHES.md`.
 5. `python tools/package_sample.py` và deploy lại bằng `deploy.sh`.
 

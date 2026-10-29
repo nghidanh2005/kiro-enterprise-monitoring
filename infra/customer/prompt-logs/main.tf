@@ -3,8 +3,8 @@
 # Provider: customer Kiro account, Region of the Kiro profile.
 #
 # Bucket policy: statement KiroLogsWrite from the Kiro prompt-logging docs.
-# Key policy for q.amazonaws.com: from the Amazon Q Developer prompt-logging
-# docs. Kiro's docs do not state one, so it stays [CHƯA XÁC MINH] until OQ-9.
+# Encryption is SSE-S3 (decided 2026-10-29): no KMS key, so Kiro needs only
+# s3:PutObject. Kiro writing into an SSE-S3 bucket is still measured in OQ-9.
 
 terraform {
   required_version = ">= 1.6"
@@ -53,11 +53,6 @@ variable "force_destroy" {
   default = false
 }
 
-variable "kms_deletion_window_days" {
-  type    = number
-  default = 30
-}
-
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 data "aws_partition" "current" {}
@@ -73,30 +68,6 @@ locals {
   results     = "athena-results/"
   db          = "kiro_prompt_audit_${replace(var.slug, "-", "_")}"
   tags        = { Project = "kiro-monitoring", Customer = var.slug, DataClass = "prompt-full-text" }
-
-  key_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid       = "EnableIAMPolicies"
-        Effect    = "Allow"
-        Principal = { AWS = "arn:${local.p}:iam::${local.account_id}:root" }
-        Action    = "kms:*"
-        Resource  = "*"
-      },
-      {
-        Sid       = "KiroPromptLogsEncrypt"
-        Effect    = "Allow"
-        Principal = { Service = "q.amazonaws.com" }
-        Action    = "kms:GenerateDataKey"
-        Resource  = "*"
-        Condition = {
-          StringEquals = { "aws:SourceAccount" = local.account_id }
-          ArnLike      = { "aws:SourceArn" = local.kiro_source }
-        }
-      },
-    ]
-  })
 
   bucket_policy = jsonencode({
     Version = "2012-10-17"
@@ -138,7 +109,6 @@ locals {
       { Sid = "ReadPromptLogs", Effect = "Allow", Action = ["s3:GetObject"], Resource = "${local.bucket_arn}/${var.prefix}*" },
       { Sid = "ListPromptLogs", Effect = "Allow", Action = ["s3:ListBucket", "s3:GetBucketLocation"], Resource = local.bucket_arn },
       { Sid = "AthenaResults", Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject"], Resource = "${local.bucket_arn}/${local.results}*" },
-      { Sid = "Decrypt", Effect = "Allow", Action = ["kms:Decrypt", "kms:GenerateDataKey"], Resource = aws_kms_key.this.arn },
       {
         Sid      = "QueryOneWorkgroup"
         Effect   = "Allow"
@@ -158,27 +128,7 @@ locals {
     ]
   })
 
-  all_policies = join("\n", [local.key_policy, local.bucket_policy, local.auditor_trust])
-}
-
-resource "aws_kms_key" "this" {
-  description             = "Kiro prompt logs of ${var.slug} - full text, stays in this account"
-  enable_key_rotation     = true
-  deletion_window_in_days = var.kms_deletion_window_days
-  policy                  = local.key_policy
-  tags                    = local.tags
-
-  lifecycle {
-    precondition {
-      condition     = !strcontains(local.all_policies, var.observability_account_id)
-      error_message = "A prompt-log policy names the observability account. Full text must not leave the customer account."
-    }
-  }
-}
-
-resource "aws_kms_alias" "this" {
-  name          = "alias/kiro-prompt-logs-${var.slug}"
-  target_key_id = aws_kms_key.this.key_id
+  all_policies = join("\n", [local.bucket_policy, local.auditor_trust, local.auditor_policy])
 }
 
 resource "aws_s3_bucket" "this" {
@@ -206,10 +156,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
   bucket = aws_s3_bucket.this.id
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.this.arn
+      sse_algorithm = "AES256"
     }
-    bucket_key_enabled = true
   }
 }
 
@@ -241,6 +189,13 @@ resource "aws_s3_bucket_policy" "this" {
   bucket     = aws_s3_bucket.this.id
   policy     = local.bucket_policy
   depends_on = [aws_s3_bucket_public_access_block.this]
+
+  lifecycle {
+    precondition {
+      condition     = !strcontains(local.all_policies, var.observability_account_id)
+      error_message = "A prompt-log policy names the observability account. Full text must not leave the customer account."
+    }
+  }
 }
 
 resource "aws_iam_role" "auditor" {
@@ -267,8 +222,7 @@ resource "aws_athena_workgroup" "this" {
     result_configuration {
       output_location = "s3://${local.bucket}/${local.results}"
       encryption_configuration {
-        encryption_option = "SSE_KMS"
-        kms_key_arn       = aws_kms_key.this.arn
+        encryption_option = "SSE_S3"
       }
     }
   }
@@ -311,10 +265,6 @@ output "bucket_name" {
 
 output "bucket_arn" {
   value = aws_s3_bucket.this.arn
-}
-
-output "kms_key_arn" {
-  value = aws_kms_key.this.arn
 }
 
 output "s3_uri_for_kiro_console" {
