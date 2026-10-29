@@ -28,6 +28,7 @@ Environment variables (set by cfn/03-identity-mapping.yaml):
                       dashboard region)
   IDC_ROLE_ARN        optional; assume this role for cross-account Identity
                       Center (org management / delegated admin account)
+  IDC_EXTERNAL_ID     optional; sts:ExternalId sent with that assume-role
   ATHENA_DATABASE     Glue database holding base_user_activity
   ATHENA_WORKGROUP    Athena workgroup to run the distinct-user query in
   ATHENA_REGION       region of the Athena workgroup / data (the dashboard
@@ -59,10 +60,12 @@ def _idc_client():
     if not role_arn:
         return boto3.client("identitystore", region_name=region, config=_BOTO_CFG)
     sts = boto3.client("sts", config=_BOTO_CFG)
-    creds = sts.assume_role(
-        RoleArn=role_arn,
-        RoleSessionName="kiro-identity-map",
-    )["Credentials"]
+    # PATCH P3 (kiro-enterprise-monitoring): ExternalId for a third-party role.
+    kwargs = {"RoleArn": role_arn, "RoleSessionName": "kiro-identity-map"}
+    external_id = os.environ.get("IDC_EXTERNAL_ID", "").strip()
+    if external_id:
+        kwargs["ExternalId"] = external_id
+    creds = sts.assume_role(**kwargs)["Credentials"]
     return boto3.client(
         "identitystore",
         region_name=region,

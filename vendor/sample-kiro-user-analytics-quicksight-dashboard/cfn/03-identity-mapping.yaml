@@ -37,6 +37,14 @@ Parameters:
       (when the directory lives in the org management / delegated-admin
       account). Leave blank for same-account Identity Center.
 
+  # PATCH P3 (kiro-enterprise-monitoring)
+  IdcExternalId:
+    Type: String
+    Default: ""
+    Description: >
+      Optional. sts:ExternalId sent when assuming IdcRoleArn. Required when
+      that role's trust policy has an sts:ExternalId condition.
+
   SourceKmsKeyArn:
     Type: String
     Default: ""
@@ -416,6 +424,7 @@ Resources:
           IDENTITY_STORE_ID: !Ref IdentityStoreId
           IDC_REGION: !Ref IdcRegion
           IDC_ROLE_ARN: !Ref IdcRoleArn
+          IDC_EXTERNAL_ID: !Ref IdcExternalId
           ATHENA_DATABASE: !Ref AthenaDatabase
           ATHENA_WORKGROUP: !Ref AthenaWorkgroup
           ATHENA_REGION: !Ref AWS::Region

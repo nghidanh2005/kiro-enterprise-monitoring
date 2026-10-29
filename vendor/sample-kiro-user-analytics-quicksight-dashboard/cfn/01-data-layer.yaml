@@ -24,6 +24,15 @@ Parameters:
       path. Leave blank if Kiro writes to the bucket root. No leading slash;
       include a trailing slash if non-empty (e.g. "kiro/").
 
+  # PATCH P1 (kiro-enterprise-monitoring): read a report written by another account.
+  SourceAccountId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[0-9]{12}$"
+    Description: >
+      Optional. Account that owns the Kiro report (the AWSLogs/<accountId>/
+      path segment). Leave blank when the report is written by this account.
+
   DatabaseName:
     Type: String
     Default: kiro_analytics
@@ -80,6 +89,7 @@ Conditions:
   # Alarms reference the Lambda by name, so they can only exist once the
   # function does (i.e. after deploy.sh stages the code zip).
   HasAlarms: !And [!Condition HasAlarmEmail, !Condition HasNormalizerCode]
+  HasSourceAccount: !Not [!Equals [!Ref SourceAccountId, ""]]
 
 Resources:
 
@@ -310,7 +320,9 @@ Resources:
       Environment:
         Variables:
           RAW_BUCKET: !Ref KiroLogsBucketName
-          RAW_PREFIX: !Sub "${KiroLogsPrefix}AWSLogs/${AWS::AccountId}/KiroLogs/user_report/"
+          RAW_PREFIX: !Sub
+            - "${KiroLogsPrefix}AWSLogs/${Acct}/KiroLogs/user_report/"
+            - Acct: !If [HasSourceAccount, !Ref SourceAccountId, !Ref "AWS::AccountId"]
           OUT_BUCKET: !Ref AthenaResultsBucket
           OUT_PREFIX: "normalized"
 

@@ -20,6 +20,7 @@ REGION="${AWS_REGION:-us-east-1}"
 STACK_PREFIX="${STACK_PREFIX:-kiro-analytics}"
 KIRO_LOGS_BUCKET="${KIRO_LOGS_BUCKET:-}"
 QS_PRINCIPAL_ARN="${QS_PRINCIPAL_ARN:-}"
+KIRO_SOURCE_ACCOUNT_ID="${KIRO_SOURCE_ACCOUNT_ID:-}"
 
 # Accept name, ARN (arn:aws:s3:::name), or s3:// URI for KIRO_LOGS_BUCKET so
 # users who paste the bucket ARN don't end up with a literal ARN string in
@@ -168,7 +169,12 @@ probe_user_report() {
     aws s3 ls "s3://${KIRO_LOGS_BUCKET}/${p}AWSLogs/${ACCOUNT_ID}/KiroLogs/user_report/" \
         --region "${REGION}" >/dev/null 2>&1
 }
-if [[ -n "${KIRO_LOGS_BUCKET}" && -n "${ACCOUNT_ID}" ]]; then
+if [[ -n "${KIRO_SOURCE_ACCOUNT_ID}" && "${KIRO_SOURCE_ACCOUNT_ID}" != "${ACCOUNT_ID}" ]]; then
+    # PATCH P2 (kiro-enterprise-monitoring): the bucket belongs to another
+    # account and the person deploying is not granted list on it by design.
+    # The post-deploy normalizer invoke result is the real check.
+    warn "report bucket belongs to account ${KIRO_SOURCE_ACCOUNT_ID}; skipped listing it (caller has no list permission by design). Check the normalizer invoke result after deploy."
+elif [[ -n "${KIRO_LOGS_BUCKET}" && -n "${ACCOUNT_ID}" ]]; then
     # FOUND tracks whether a probe succeeded; DETECTED_PREFIX holds the value
     # (which may legitimately be the empty string if Kiro writes to the
     # bucket root).

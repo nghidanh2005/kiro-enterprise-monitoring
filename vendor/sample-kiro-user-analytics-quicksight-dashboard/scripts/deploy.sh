@@ -11,6 +11,9 @@
 #   HASH_EMAILS        - default false
 #   KMS_KEY_ARN        - default ""
 #   KIRO_LOGS_PREFIX   - default "" (auto-detected if unset)
+#   KIRO_SOURCE_ACCOUNT_ID - default "" (this account). PATCH P1: account that
+#                        writes the Kiro report, when the bucket is in another
+#                        account. Set KIRO_LOGS_PREFIX explicitly in that case.
 #   QS_IAM_ROLE_NAME   - default aws-quicksight-service-role-v0 (the QS-managed
 #                        default). Override if your account is configured to
 #                        use an existing role under QuickSight -> Manage
@@ -75,6 +78,8 @@ IDENTITY_MAPPING="${IDENTITY_MAPPING:-false}"
 IDENTITY_STORE_ID="${IDENTITY_STORE_ID:-}"
 IDC_REGION="${IDC_REGION:-}"
 IDC_ROLE_ARN="${IDC_ROLE_ARN:-}"
+IDC_EXTERNAL_ID="${IDC_EXTERNAL_ID:-}"
+KIRO_SOURCE_ACCOUNT_ID="${KIRO_SOURCE_ACCOUNT_ID:-}"
 IDENTITY_MAP_REFRESH_SCHEDULE="${IDENTITY_MAP_REFRESH_SCHEDULE:-cron(30 3 * * ? *)}"
 ALARM_EMAIL="${ALARM_EMAIL:-}"
 LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
@@ -247,7 +252,7 @@ fi
 KIRO_LOGS_PREFIX_FOUND=""
 probe_prefix() {
     local p="$1"
-    aws s3 ls "s3://${KIRO_LOGS_BUCKET}/${p}AWSLogs/${ACCOUNT_ID}/KiroLogs/user_report/" \
+    aws s3 ls "s3://${KIRO_LOGS_BUCKET}/${p}AWSLogs/${KIRO_SOURCE_ACCOUNT_ID:-$ACCOUNT_ID}/KiroLogs/user_report/" \
         --region "${REGION}" >/dev/null 2>&1
 }
 if [[ "${KIRO_LOGS_PREFIX-unset}" == "unset" ]]; then
@@ -324,7 +329,8 @@ aws cloudformation deploy \
         "DatabaseName=${DATABASE_NAME}" \
         "WorkgroupName=${WORKGROUP_NAME}" \
         "NormalizerLambdaCodeS3Key=${NRM_CODE_KEY}" \
-        "AlarmEmail=${ALARM_EMAIL}"
+        "AlarmEmail=${ALARM_EMAIL}" \
+        "SourceAccountId=${KIRO_SOURCE_ACCOUNT_ID}"
 
 if [[ -z "${NRM_CODE_KEY}" ]]; then
     echo ">> Staging normalizer zip (first deploy) and re-deploying ${DATA_STACK}"
@@ -344,7 +350,8 @@ if [[ -z "${NRM_CODE_KEY}" ]]; then
             "DatabaseName=${DATABASE_NAME}" \
             "WorkgroupName=${WORKGROUP_NAME}" \
             "NormalizerLambdaCodeS3Key=${NRM_KEY}" \
-            "AlarmEmail=${ALARM_EMAIL}"
+            "AlarmEmail=${ALARM_EMAIL}" \
+            "SourceAccountId=${KIRO_SOURCE_ACCOUNT_ID}"
 fi
 
 DATABASE="$(aws cloudformation describe-stacks --region "${REGION}" --stack-name "${DATA_STACK}" \
@@ -507,6 +514,7 @@ if [[ "${IDENTITY_MAPPING}" == "true" ]]; then
             "IdentityStoreId=${IDENTITY_STORE_ID}" \
             "IdcRegion=${IDC_REGION}" \
             "IdcRoleArn=${IDC_ROLE_ARN}" \
+            "IdcExternalId=${IDC_EXTERNAL_ID}" \
             "SourceKmsKeyArn=${KMS_KEY_ARN}" \
             "AthenaDatabase=${DATABASE}" \
             "AthenaWorkgroup=${WORKGROUP}" \
